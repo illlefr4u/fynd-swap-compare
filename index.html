@@ -253,6 +253,8 @@ async function getQuote() {
     html += sourceCard('fynd', 'Fynd', 10, d.fynd, buy.dec, buy.symbol, amount, gp, d.winner === 'fynd', dp);
     html += sourceCard('kyberswap', 'KyberSwap', 0, d.kyberswap, buy.dec, buy.symbol, amount, gp, d.winner === 'kyberswap', dp);
     html += sourceCard('cowswap', 'CowSwap', 0, d.cowswap, buy.dec, buy.symbol, amount, gp, d.winner === 'cowswap', dp);
+    html += sourceCard('enso', 'Enso', 0, d.enso, buy.dec, buy.symbol, amount, gp, d.winner === 'enso', dp);
+    html += sourceCard('openocean', 'OpenOcean', 0, d.openocean, buy.dec, buy.symbol, amount, gp, d.winner === 'openocean', dp);
     html += '</div>';
 
     // Routing quality comparison (quote = gross, fees are on-chain)
@@ -261,6 +263,8 @@ async function getQuote() {
     if (d.fynd) routing.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out)});
     if (d.kyberswap) routing.push({name: 'KyberSwap', out: parseFloat(d.kyberswap.amount_out)});
     if (d.cowswap) routing.push({name: 'CowSwap', out: parseFloat(d.cowswap.amount_out)});
+    if (d.enso) routing.push({name: 'Enso', out: parseFloat(d.enso.amount_out)});
+    if (d.openocean) routing.push({name: 'OpenOcean', out: parseFloat(d.openocean.amount_out)});
 
     if (routing.length >= 2) {
       routing.sort((a,b) => b.out - a.out);
@@ -283,6 +287,8 @@ async function getQuote() {
     if (d.fynd) exec.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out) * (1 - 0.001)});
     if (d.kyberswap) exec.push({name: 'KyberSwap', out: parseFloat(d.kyberswap.amount_out)});
     if (d.cowswap) exec.push({name: 'CowSwap', out: parseFloat(d.cowswap.amount_out)});
+    if (d.enso) exec.push({name: 'Enso', out: parseFloat(d.enso.amount_out)});
+    if (d.openocean) exec.push({name: 'OpenOcean', out: parseFloat(d.openocean.amount_out)});
 
     if (exec.length >= 2) {
       exec.sort((a,b) => b.out - a.out);

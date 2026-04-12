@@ -118,17 +118,11 @@ def get_inch_classic_swap(src, dst, amount, sender, slippage=0.5):
 
 
 def get_inch_fusion(src, dst, amount, sender):
-    """Get 1inch fusion (gasless intent) quote via swap MCP-style endpoint."""
-    # Fusion quoter v2.0 requires specific address format that differs from docs.
-    # Try multiple approaches.
-    for dst_addr in [inch_addr(dst), dst]:
-        url = (f'{INCH_API}/fusion/quoter/v2.0/1/quote/receive?'
-               f'srcTokenAddress={inch_addr(src)}&dstTokenAddress={dst_addr}'
-               f'&amount={amount}&walletAddress={sender}')
-        result = fetch_json(url, headers=inch_headers())
-        if isinstance(result, dict) and 'dstTokenAmount' in result:
-            return result
-    return result  # return last error
+    """Get 1inch fusion (gasless intent) quote."""
+    url = (f'{INCH_API}/fusion/quoter/v2.0/1/quote/receive?'
+           f'fromTokenAddress={src}&toTokenAddress={dst}'
+           f'&amount={amount}&walletAddress={sender}&enableEstimate=true')
+    return fetch_json(url, headers=inch_headers())
 
 
 def get_fynd_quote(src, dst, amount, sender, gas_price='50000000'):
@@ -174,6 +168,20 @@ def get_cowswap_quote(src, dst, amount, sender):
     return fetch_json('https://api.cow.fi/mainnet/api/v1/quote', data=data)
 
 
+def get_enso_quote(src, dst, amount, sender):
+    url = (f'https://api.enso.finance/api/v1/shortcuts/route?chainId=1'
+           f'&fromAddress={sender}&tokenIn={src}&tokenOut={dst}&amountIn={amount}')
+    return fetch_json(url)
+
+
+def get_openocean_quote(src, dst, amount_human):
+    """OpenOcean expects human-readable amount (e.g. 5000), not wei."""
+    url = (f'https://open-api.openocean.finance/v4/1/quote?'
+           f'inTokenAddress={src}&outTokenAddress={dst}'
+           f'&amount={amount_human}&gasPrice=50000000')
+    return fetch_json(url)
+
+
 def token_decimals(addr):
     for info in TOKENS.values():
         if info['addr'].lower() == addr.lower():
@@ -209,12 +217,18 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
     if isinstance(gas_data, dict) and 'medium' in gas_data:
         gas_price = gas_data['medium']['maxFeePerGas']
 
+    # Convert amount to human-readable for APIs that need it
+    src_dec = token_decimals(src)
+    amount_human = str(int(amount) / (10 ** src_dec))
+
     # Fetch all sources in parallel
     classic_f = executor.submit(get_inch_classic_quote, src, dst, amount)
     fusion_f = executor.submit(get_inch_fusion, src, dst, amount, sender)
     fynd_f = executor.submit(get_fynd_quote, src, dst, amount, sender, gas_price)
     kyber_f = executor.submit(get_kyberswap_quote, src, dst, amount)
     cow_f = executor.submit(get_cowswap_quote, src, dst, amount, sender)
+    enso_f = executor.submit(get_enso_quote, src, dst, amount, sender)
+    ocean_f = executor.submit(get_openocean_quote, src, dst, amount_human)
     prices_f = executor.submit(get_prices, [src, dst])
 
     classic_raw = classic_f.result()
@@ -222,6 +236,8 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
     fynd_raw = fynd_f.result()
     kyber_raw = kyber_f.result()
     cow_raw = cow_f.result()
+    enso_raw = enso_f.result()
+    ocean_raw = ocean_f.result()
     prices_raw = prices_f.result()
 
     # Parse prices (API returns lowercase addresses)
@@ -240,13 +256,15 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
             'gas_price': gas_price,
         }
 
-    # Parse 1inch fusion
+    # Parse 1inch fusion (field = toTokenAmount, not dstTokenAmount)
     fusion_out = 0
     fusion_info = {}
-    if isinstance(fusion_raw, dict) and 'dstTokenAmount' in fusion_raw:
-        fusion_out = int(fusion_raw['dstTokenAmount'])
+    if isinstance(fusion_raw, dict) and 'toTokenAmount' in fusion_raw:
+        fusion_out = int(fusion_raw['toTokenAmount'])
         fusion_info = {
-            'presets': list(fusion_raw.get('presets', {}).keys()),
+            'gas_estimate': str(fusion_raw.get('gas', '0')),
+            'gas_price': gas_price,
+            'gasless': True,
         }
 
     # Parse Fynd (safe: check orders list before indexing)
@@ -292,6 +310,28 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
             'fee_amount': q.get('feeAmount', '0'),
         }
 
+    # Parse Enso
+    enso_out = 0
+    enso_info = {}
+    if isinstance(enso_raw, dict) and 'amountOut' in enso_raw:
+        enso_out = int(enso_raw['amountOut'])
+        enso_info = {
+            'gas_estimate': str(enso_raw.get('gas', '0')),
+            'gas_price': gas_price,
+        }
+
+    # Parse OpenOcean
+    ocean_out = 0
+    ocean_info = {}
+    if isinstance(ocean_raw, dict) and 'data' in ocean_raw:
+        od = ocean_raw['data']
+        if od and od.get('outAmount'):
+            ocean_out = int(od['outAmount'])
+            ocean_info = {
+                'gas_estimate': str(od.get('estimatedGas', '0')),
+                'gas_price': gas_price,
+            }
+
     # On-chain fees per venue (deducted by smart contract at execution)
     # CowSwap/KyberSwap: 0 bps protocol fee on output (fee is in sell token for CoW)
     ON_CHAIN_FEE = {
@@ -300,24 +340,28 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
         'fynd': 0.001,
         'kyberswap': 0.0,
         'cowswap': 0.0,
+        'enso': 0.0,
+        'openocean': 0.0,
     }
 
     # Build candidates for execution comparison
+    all_sources = {
+        '1inch_classic': classic_out,
+        '1inch_fusion': fusion_out,
+        'fynd': fynd_out,
+        'kyberswap': kyber_out,
+        'cowswap': cow_out,
+        'enso': enso_out,
+        'openocean': ocean_out,
+    }
     exec_candidates = {}
-    if classic_out > 0:
-        exec_candidates['1inch_classic'] = classic_out * (1 - ON_CHAIN_FEE['1inch_classic'])
-    if fusion_out > 0:
-        exec_candidates['1inch_fusion'] = fusion_out * (1 - ON_CHAIN_FEE['1inch_fusion'])
-    if fynd_out > 0:
-        exec_candidates['fynd'] = fynd_out * (1 - ON_CHAIN_FEE['fynd'])
-    if kyber_out > 0:
-        exec_candidates['kyberswap'] = kyber_out * (1 - ON_CHAIN_FEE['kyberswap'])
-    if cow_out > 0:
-        exec_candidates['cowswap'] = cow_out * (1 - ON_CHAIN_FEE['cowswap'])
+    for name, out in all_sources.items():
+        if out > 0:
+            exec_candidates[name] = out * (1 - ON_CHAIN_FEE.get(name, 0))
 
     if exec_candidates:
         winner = max(exec_candidates, key=exec_candidates.get)
-        all_gross = [v for v in [classic_out, fusion_out, fynd_out, kyber_out, cow_out] if v > 0]
+        all_gross = [v for v in all_sources.values() if v > 0]
         best_out = max(all_gross) if all_gross else 0
         worst_exec = min(exec_candidates.values())
         best_exec = exec_candidates[winner]
@@ -357,6 +401,14 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
             'amount_out': str(cow_out), **cow_info
         } if cow_out > 0 else None,
         'cowswap_error': cow_raw.get('error') if cow_out == 0 else None,
+        'enso': {
+            'amount_out': str(enso_out), **enso_info
+        } if enso_out > 0 else None,
+        'enso_error': enso_raw.get('error') if enso_out == 0 else None,
+        'openocean': {
+            'amount_out': str(ocean_out), **ocean_info
+        } if ocean_out > 0 else None,
+        'openocean_error': ocean_raw.get('error') if ocean_out == 0 else None,
         'diff_bps': round(diff_bps, 2),
         'prices': {
             'src': prices.get(src.lower()),
