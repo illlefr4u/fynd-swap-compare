@@ -159,38 +159,47 @@ async function fetchGas() {
   } catch(e) {}
 }
 
-function sourceCard(name, label, feeBps, data, buyDec, buySym, sellAmount, gasPrice, isWinner) {
+function sourceCard(name, label, feeBps, data, buyDec, buySym, sellAmount, gasPrice, isWinner, dstPrice) {
   if (!data) return `<div class="src-card error-card"><div class="src-name">${label}</div><div class="status error" style="padding:8px;font-size:11px">unavailable</div></div>`;
 
   const outRaw = parseFloat(data.amount_out);
   const outHuman = outRaw / Math.pow(10, buyDec);
   const sellUsd = parseFloat(sellAmount);
-  const execPrice = sellUsd / outHuman;
 
-  const feeUsd = sellUsd * feeBps / 10000;
+  // Reverse-engineer pre-fee output (routing quality)
   const grossOut = outHuman / (1 - feeBps / 10000);
   const feeLost = grossOut - outHuman;
+  const feeUsd = dstPrice ? feeLost * dstPrice : sellUsd * feeBps / 10000;
+
+  // Execution price (what you actually get)
+  const execPrice = sellUsd / outHuman;
 
   const gasUnits = parseInt(data.gas_estimate || data.gas || '0');
   const gp = parseInt(data.gas_price || gasPrice || '50000000');
   const gasETH = gasUnits * gp / 1e18;
+  const gasUsd = dstPrice ? gasETH * dstPrice : 0;
 
   const isGasless = name === '1inch_fusion';
+  const displaySym = (data.receives_native_eth && name !== 'fynd') ? 'ETH' : buySym;
 
   let h = `<div class="src-card${isWinner ? ' winner' : ''}">`;
   h += `<div class="src-name">${label}</div>`;
-  const displaySym = (data.receives_native_eth && name !== 'fynd') ? 'ETH' : buySym;
-  h += `<div class="src-amount">${fmt(data.amount_out, buyDec)}</div>`;
-  h += `<div class="src-price">1 ${displaySym} = $${execPrice.toFixed(2)}${data.receives_native_eth && name !== 'fynd' ? ' (native ETH)' : ''}</div>`;
-  h += `<div class="breakdown">`;
 
-  h += `<div class="bk"><span class="bk-l">Infra fee</span><span class="bk-v bad">${feeBps} bps (~$${feeUsd.toFixed(2)})</span></div>`;
+  // Gross output (routing quality)
+  h += `<div class="src-amount" style="font-size:14px;color:#8b949e;font-weight:400">Route: ${grossOut.toFixed(6)}</div>`;
+  // Net output (execution price)
+  h += `<div class="src-amount">${fmt(data.amount_out, buyDec)} ${displaySym}</div>`;
+  h += `<div class="src-price">1 ${displaySym} = $${execPrice.toFixed(2)}${data.receives_native_eth && name !== 'fynd' ? ' (native)' : ''}</div>`;
+
+  h += `<div class="breakdown">`;
+  h += `<div class="bk"><span class="bk-l">Gross (pre-fee)</span><span class="bk-v">${grossOut.toFixed(6)}</span></div>`;
+  h += `<div class="bk"><span class="bk-l">Fee (${feeBps} bps)</span><span class="bk-v bad">-${feeLost.toFixed(6)} (~$${feeUsd.toFixed(2)})</span></div>`;
+  h += `<div class="bk"><span class="bk-l">Net output</span><span class="bk-v">${outHuman.toFixed(6)}</span></div>`;
 
   if (isGasless) {
     h += `<div class="bk"><span class="bk-l">Gas</span><span class="bk-v good">gasless</span></div>`;
   } else if (gasUnits > 0) {
-    h += `<div class="bk"><span class="bk-l">Gas</span><span class="bk-v bad">${gasUnits.toLocaleString()} units</span></div>`;
-    h += `<div class="bk"><span class="bk-l">Gas cost</span><span class="bk-v bad">${gasETH.toFixed(6)} ETH</span></div>`;
+    h += `<div class="bk"><span class="bk-l">Gas</span><span class="bk-v bad">${gasUnits.toLocaleString()} units (~$${gasUsd.toFixed(2)})</span></div>`;
   } else {
     h += `<div class="bk"><span class="bk-l">Gas</span><span class="bk-v">n/a</span></div>`;
   }
@@ -238,28 +247,49 @@ async function getQuote() {
     }
 
     const gp = d.gas_price || '50000000';
+    const dp = d.prices?.dst || 0;
 
     let html = '<div class="sources">';
-    html += sourceCard('1inch_classic', '1inch Classic', 30, d.inch_classic, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_classic');
-    html += sourceCard('1inch_fusion', '1inch Fusion', 30, d.inch_fusion, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_fusion');
-    html += sourceCard('fynd', 'Fynd', 10, d.fynd, buy.dec, buy.symbol, amount, gp, d.winner === 'fynd');
+    html += sourceCard('1inch_classic', '1inch Classic (30 bps)', 30, d.inch_classic, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_classic', dp);
+    html += sourceCard('1inch_fusion', '1inch Fusion (30 bps)', 30, d.inch_fusion, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_fusion', dp);
+    html += sourceCard('fynd', 'Fynd (10 bps)', 10, d.fynd, buy.dec, buy.symbol, amount, gp, d.winner === 'fynd', dp);
     html += '</div>';
 
-    // Diff bar
-    const vals = [];
-    if (d.inch_classic) vals.push({name: '1inch Classic', out: parseFloat(d.inch_classic.amount_out)});
-    if (d.inch_fusion) vals.push({name: '1inch Fusion', out: parseFloat(d.inch_fusion.amount_out)});
-    if (d.fynd) vals.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out)});
+    // Routing quality comparison (pre-fee gross output)
+    const FEE = {'1inch Classic': 0.003, '1inch Fusion': 0.003, 'Fynd': 0.001};
+    const routing = [];
+    if (d.inch_classic) routing.push({name: '1inch', gross: parseFloat(d.inch_classic.amount_out) / (1 - 0.003)});
+    if (d.fynd) routing.push({name: 'Fynd', gross: parseFloat(d.fynd.amount_out) / (1 - 0.001)});
 
-    if (vals.length >= 2) {
-      vals.sort((a,b) => b.out - a.out);
-      const best = vals[0], second = vals[1];
+    if (routing.length >= 2) {
+      routing.sort((a,b) => b.gross - a.gross);
+      const r = routing[0], r2 = routing[1];
+      const rdiff = (r.gross - r2.gross) / Math.pow(10, buy.dec);
+      const rbps = ((r.gross - r2.gross) / r2.gross * 10000).toFixed(1);
+      html += `<div class="diff-bar" style="border-color:#1f6feb">
+        <div style="font-size:11px;color:#6e7681;margin-bottom:4px">ROUTING QUALITY (pre-fee)</div>
+        <span class="diff-val" style="color:#79c0ff">${r.name}</span> finds
+        <span class="diff-val" style="color:#79c0ff">+${rdiff.toFixed(6)} ${buy.symbol}</span> better route
+        (<span class="diff-val" style="color:#79c0ff">${rbps} bps</span>)
+      </div>`;
+    }
+
+    // Execution comparison (post-fee, what you actually get)
+    const exec = [];
+    if (d.inch_classic) exec.push({name: '1inch Classic', out: parseFloat(d.inch_classic.amount_out)});
+    if (d.inch_fusion) exec.push({name: '1inch Fusion', out: parseFloat(d.inch_fusion.amount_out)});
+    if (d.fynd) exec.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out)});
+
+    if (exec.length >= 2) {
+      exec.sort((a,b) => b.out - a.out);
+      const best = exec[0], second = exec[1];
       const diff = (best.out - second.out) / Math.pow(10, buy.dec);
       const diffBps = ((best.out - second.out) / second.out * 10000).toFixed(1);
       html += `<div class="diff-bar">
-        <span class="diff-val">${best.name}</span> wins by
-        <span class="diff-val">+${diff.toFixed(6)} ${buy.symbol}</span>
-        (<span class="diff-val">${diffBps} bps</span> vs ${second.name})
+        <div style="font-size:11px;color:#6e7681;margin-bottom:4px">EXECUTION PRICE (post-fee)</div>
+        <span class="diff-val">${best.name}</span> gives
+        <span class="diff-val">+${diff.toFixed(6)} ${buy.symbol}</span> more
+        (<span class="diff-val">${diffBps} bps</span>)
       </div>`;
     }
 
