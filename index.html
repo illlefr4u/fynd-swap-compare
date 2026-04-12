@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Swap</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #e6edf3; min-height: 100vh; display: flex; justify-content: center; padding: 40px 16px; }
+  .app { width: 680px; }
+  h1 { font-size: 20px; color: #e6edf3; }
+
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 16px; padding: 16px; margin-bottom: 12px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .row:last-child { margin-bottom: 0; }
+  label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; display: block; margin-bottom: 4px; }
+  select, input {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 10px;
+    color: #e6edf3; padding: 12px; font-size: 16px; outline: none; width: 100%;
+  }
+  select:focus, input:focus { border-color: #58a6ff; }
+  .token-select { width: 120px; flex-shrink: 0; }
+  .amount-input { flex: 1; }
+  .slippage-input { width: 80px; flex-shrink: 0; text-align: center; }
+
+  .swap-icon { text-align: center; margin: -4px 0; position: relative; z-index: 1; }
+  .swap-icon button { background: #21262d; border: 3px solid #0d1117; border-radius: 10px; color: #8b949e; font-size: 18px; padding: 6px 10px; cursor: pointer; }
+  .swap-icon button:hover { color: #e6edf3; }
+
+  .btn { width: 100%; padding: 14px; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 8px; }
+  .btn-quote { background: #21262d; color: #e6edf3; }
+  .btn-quote:hover { background: #30363d; }
+  .btn-swap { background: #238636; color: #fff; }
+  .btn-swap:hover { background: #2ea043; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .sources { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 12px; }
+  @media (max-width: 700px) { .sources { grid-template-columns: 1fr; } }
+  .src-card { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 14px; position: relative; transition: border-color 0.3s; }
+  .src-card.winner { border-color: #3fb950; }
+  .src-card.winner::before {
+    content: 'BEST'; position: absolute; top: 10px; right: 10px;
+    background: #238636; color: #fff; font-size: 10px; font-weight: 700;
+    padding: 2px 6px; border-radius: 4px; letter-spacing: 0.5px;
+  }
+  .src-card.error-card { opacity: 0.5; }
+
+  .src-name { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: #8b949e; }
+  .src-amount { font-size: 20px; font-weight: 700; margin-bottom: 2px; }
+  .src-price { font-size: 12px; color: #8b949e; margin-bottom: 10px; }
+
+  .breakdown { border-top: 1px solid #21262d; padding-top: 8px; }
+  .bk { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; }
+  .bk-l { color: #6e7681; }
+  .bk-v { color: #8b949e; }
+  .bk-v.good { color: #3fb950; }
+  .bk-v.bad { color: #f85149; }
+
+  .gas-bar { font-size: 12px; color: #8b949e; text-align: center; margin-bottom: 12px; }
+  .gas-val { color: #f0883e; font-weight: 600; }
+
+  .wallet-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .wallet-btn { background: #21262d; border: 1px solid #30363d; border-radius: 10px; color: #e6edf3; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  .wallet-btn:hover { background: #30363d; }
+  .wallet-addr { font-size: 12px; color: #3fb950; font-family: monospace; }
+
+  .status { text-align: center; padding: 16px; color: #8b949e; font-size: 13px; }
+  .status.error { color: #f85149; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 6px; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .diff-bar { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 10px 14px; margin-top: 10px; text-align: center; font-size: 13px; color: #8b949e; }
+  .diff-val { color: #3fb950; font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="wallet-bar">
+    <h1>Swap</h1>
+    <button class="wallet-btn" id="walletBtn" onclick="connectWallet()">Connect Rabby</button>
+  </div>
+  <div class="gas-bar">Base fee: <span class="gas-val" id="gasVal">--</span></div>
+
+  <div class="card">
+    <label>You sell</label>
+    <div class="row">
+      <select id="sellToken" class="token-select" onchange="clearResult()">
+        <option value="USDC" data-addr="0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" data-dec="6">USDC</option>
+        <option value="USDT" data-addr="0xdAC17F958D2ee523a2206206994597C13D831ec7" data-dec="6">USDT</option>
+        <option value="DAI" data-addr="0x6B175474E89094C44Da98b954EedeAC495271d0F" data-dec="18">DAI</option>
+        <option value="WETH" data-addr="0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2" data-dec="18">WETH</option>
+        <option value="WBTC" data-addr="0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599" data-dec="8">WBTC</option>
+      </select>
+      <input type="number" id="sellAmount" class="amount-input" value="5000" min="0" step="any" oninput="clearResult()">
+      <div style="text-align:center">
+        <label>Slippage</label>
+        <input type="number" id="slippage" class="slippage-input" value="0.5" min="0.01" max="50" step="0.1">
+      </div>
+    </div>
+  </div>
+
+  <div class="swap-icon"><button onclick="flipTokens()">&#x2195;</button></div>
+
+  <div class="card">
+    <label>You receive (best)</label>
+    <div class="row">
+      <select id="buyToken" class="token-select" onchange="clearResult()">
+        <option value="WETH" data-addr="0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2" data-dec="18">WETH</option>
+        <option value="USDC" data-addr="0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" data-dec="6">USDC</option>
+        <option value="USDT" data-addr="0xdAC17F958D2ee523a2206206994597C13D831ec7" data-dec="6">USDT</option>
+        <option value="DAI" data-addr="0x6B175474E89094C44Da98b954EedeAC495271d0F" data-dec="18">DAI</option>
+        <option value="WBTC" data-addr="0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599" data-dec="8">WBTC</option>
+      </select>
+      <input type="text" id="buyAmount" class="amount-input" readonly placeholder="--" style="color:#8b949e">
+    </div>
+  </div>
+
+  <button class="btn btn-quote" id="quoteBtn" onclick="getQuote()">Get Best Price</button>
+  <div id="resultArea"></div>
+</div>
+
+<script>
+let account = null, lastQuote = null;
+
+function sel(id) {
+  const s = document.getElementById(id);
+  const o = s.options[s.selectedIndex];
+  return { symbol: o.value, addr: o.dataset.addr, dec: parseInt(o.dataset.dec) };
+}
+function fmt(wei, dec) {
+  const n = parseFloat(wei) / Math.pow(10, dec);
+  if (n > 10000) return n.toLocaleString('en-US', {maximumFractionDigits: 2});
+  if (n > 100) return n.toLocaleString('en-US', {maximumFractionDigits: 3});
+  if (n > 1) return n.toLocaleString('en-US', {maximumFractionDigits: 4});
+  return n.toLocaleString('en-US', {maximumFractionDigits: 6});
+}
+function toWei(a, d) { return BigInt(Math.round(parseFloat(a) * Math.pow(10, d))).toString(); }
+function clearResult() { document.getElementById('resultArea').innerHTML = ''; lastQuote = null; document.getElementById('buyAmount').value = ''; }
+function flipTokens() { const s = document.getElementById('sellToken'), b = document.getElementById('buyToken'), sv = s.value; s.value = b.value; b.value = sv; clearResult(); }
+
+async function connectWallet() {
+  if (!window.ethereum) { alert('Rabby/MetaMask not found'); return; }
+  try {
+    const accs = await window.ethereum.request({method: 'eth_requestAccounts'});
+    account = accs[0];
+    document.getElementById('walletBtn').innerHTML = `<span class="wallet-addr">${account.slice(0,6)}...${account.slice(-4)}</span>`;
+  } catch(e) { console.error(e); }
+}
+
+async function fetchGas() {
+  try {
+    const r = await fetch('/api/gas');
+    const d = await r.json();
+    if (d.baseFee) {
+      const gwei = v => (parseInt(v) / 1e9).toFixed(4);
+      document.getElementById('gasVal').textContent =
+        `${gwei(d.baseFee)} Gwei (tip: +${gwei(d.low.maxPriorityFeePerGas)} low / +${gwei(d.medium.maxPriorityFeePerGas)} med / +${gwei(d.high.maxPriorityFeePerGas)} high)`;
+    }
+  } catch(e) {}
+}
+
+function sourceCard(name, label, feeBps, data, buyDec, buySym, sellAmount, gasPrice, isWinner) {
+  if (!data) return `<div class="src-card error-card"><div class="src-name">${label}</div><div class="status error" style="padding:8px;font-size:11px">unavailable</div></div>`;
+
+  const outRaw = parseFloat(data.amount_out);
+  const outHuman = outRaw / Math.pow(10, buyDec);
+  const sellUsd = parseFloat(sellAmount);
+  const execPrice = sellUsd / outHuman;
+
+  const feeUsd = sellUsd * feeBps / 10000;
+  const grossOut = outHuman / (1 - feeBps / 10000);
+  const feeLost = grossOut - outHuman;
+
+  const gasUnits = parseInt(data.gas_estimate || data.gas || '0');
+  const gp = parseInt(data.gas_price || gasPrice || '50000000');
+  const gasETH = gasUnits * gp / 1e18;
+
+  const isGasless = name === '1inch_fusion';
+
+  let h = `<div class="src-card${isWinner ? ' winner' : ''}">`;
+  h += `<div class="src-name">${label}</div>`;
+  h += `<div class="src-amount">${fmt(data.amount_out, buyDec)}</div>`;
+  h += `<div class="src-price">1 ${buySym} = $${execPrice.toFixed(2)}</div>`;
+  h += `<div class="breakdown">`;
+
+  h += `<div class="bk"><span class="bk-l">Infra fee</span><span class="bk-v bad">${feeBps} bps (~$${feeUsd.toFixed(2)})</span></div>`;
+
+  if (isGasless) {
+    h += `<div class="bk"><span class="bk-l">Gas</span><span class="bk-v good">gasless</span></div>`;
+  } else if (gasUnits > 0) {
+    h += `<div class="bk"><span class="bk-l">Gas</span><span class="bk-v bad">${gasUnits.toLocaleString()} units</span></div>`;
+    h += `<div class="bk"><span class="bk-l">Gas cost</span><span class="bk-v bad">${gasETH.toFixed(6)} ETH</span></div>`;
+  } else {
+    h += `<div class="bk"><span class="bk-l">Gas</span><span class="bk-v">n/a</span></div>`;
+  }
+
+  if (data.route) h += `<div class="bk"><span class="bk-l">Route</span><span class="bk-v">${data.route}</span></div>`;
+  if (data.solve_time_ms !== undefined) h += `<div class="bk"><span class="bk-l">Solve</span><span class="bk-v">${data.solve_time_ms}ms</span></div>`;
+  if (data.block) h += `<div class="bk"><span class="bk-l">Block</span><span class="bk-v">#${data.block}</span></div>`;
+
+  h += `</div></div>`;
+  return h;
+}
+
+async function getQuote() {
+  const btn = document.getElementById('quoteBtn');
+  const area = document.getElementById('resultArea');
+  const sell = sel('sellToken'), buy = sel('buyToken');
+  const amount = document.getElementById('sellAmount').value;
+  if (!amount || parseFloat(amount) <= 0) return;
+
+  btn.disabled = true; btn.textContent = 'Finding best price...';
+  area.innerHTML = '<div class="status"><span class="spinner"></span>Comparing 1inch Classic, Fusion & Fynd...</div>';
+
+  try {
+    const sender = account || '';
+    const slippage = document.getElementById('slippage').value;
+    const r = await fetch(`/api/quote?src=${sell.addr}&dst=${buy.addr}&amount=${toWei(amount, sell.dec)}&sender=${sender}&slippage=${slippage}`);
+    const d = await r.json();
+    lastQuote = d;
+
+    document.getElementById('buyAmount').value = fmt(d.best_amount_out, buy.dec);
+
+    const gp = d.gas_price || '50000000';
+
+    let html = '<div class="sources">';
+    html += sourceCard('1inch_classic', '1inch Classic', 30, d.inch_classic, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_classic');
+    html += sourceCard('1inch_fusion', '1inch Fusion', 30, d.inch_fusion, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_fusion');
+    html += sourceCard('fynd', 'Fynd', 10, d.fynd, buy.dec, buy.symbol, amount, gp, d.winner === 'fynd');
+    html += '</div>';
+
+    // Diff bar
+    const vals = [];
+    if (d.inch_classic) vals.push({name: '1inch Classic', out: parseFloat(d.inch_classic.amount_out)});
+    if (d.inch_fusion) vals.push({name: '1inch Fusion', out: parseFloat(d.inch_fusion.amount_out)});
+    if (d.fynd) vals.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out)});
+
+    if (vals.length >= 2) {
+      vals.sort((a,b) => b.out - a.out);
+      const best = vals[0], second = vals[1];
+      const diff = (best.out - second.out) / Math.pow(10, buy.dec);
+      const diffBps = ((best.out - second.out) / second.out * 10000).toFixed(1);
+      html += `<div class="diff-bar">
+        <span class="diff-val">${best.name}</span> wins by
+        <span class="diff-val">+${diff.toFixed(6)} ${buy.symbol}</span>
+        (<span class="diff-val">${diffBps} bps</span> vs ${second.name})
+      </div>`;
+    }
+
+    // Swap button
+    if (account) {
+      const winLabel = d.winner.replace('1inch_classic','1inch Classic').replace('1inch_fusion','1inch Fusion').replace('fynd','Fynd');
+      html += `<button class="btn btn-swap" onclick="doSwap()">Swap via ${winLabel}</button>`;
+    } else {
+      html += `<button class="btn btn-swap" onclick="connectWallet()" style="background:#1f6feb">Connect wallet to swap</button>`;
+    }
+
+    area.innerHTML = html;
+  } catch(e) {
+    area.innerHTML = `<div class="status error">${e.message}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Get Best Price';
+  }
+}
+
+async function doSwap() {
+  if (!account || !lastQuote) return;
+  const area = document.getElementById('resultArea');
+  const sell = sel('sellToken'), buy = sel('buyToken');
+  const amount = document.getElementById('sellAmount').value;
+  const slippage = document.getElementById('slippage').value;
+
+  area.innerHTML += '<div class="status"><span class="spinner"></span>Getting calldata...</div>';
+  try {
+    const r = await fetch(`/api/swap?src=${sell.addr}&dst=${buy.addr}&amount=${toWei(amount, sell.dec)}&sender=${account}&slippage=${slippage}&source=${lastQuote.winner}`);
+    const d = await r.json();
+    if (d.error) { area.innerHTML += `<div class="status error">${d.error}</div>`; return; }
+    if (d.tx) {
+      area.innerHTML += '<div class="status"><span class="spinner"></span>Confirm in Rabby...</div>';
+      const txHash = await window.ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{ from: account, to: d.tx.to, data: d.tx.data, value: d.tx.value ? ('0x' + parseInt(d.tx.value).toString(16)) : '0x0' }]
+      });
+      area.innerHTML += `<div class="status" style="color:#3fb950">Sent! <a href="https://etherscan.io/tx/${txHash}" target="_blank" style="color:#58a6ff">${txHash.slice(0,14)}...</a></div>`;
+    }
+  } catch(e) { area.innerHTML += `<div class="status error">${e.message}</div>`; }
+}
+
+fetchGas(); setInterval(fetchGas, 30000);
+if (window.ethereum?.selectedAddress) {
+  account = window.ethereum.selectedAddress;
+  document.getElementById('walletBtn').innerHTML = `<span class="wallet-addr">${account.slice(0,6)}...${account.slice(-4)}</span>`;
+}
+</script>
+</body>
+</html>
