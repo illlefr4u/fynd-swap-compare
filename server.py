@@ -96,36 +96,29 @@ def get_gas():
     return fetch_json(f'{INCH_API}/gas-price/v1.6/1', headers=inch_headers())
 
 
-COINGECKO_IDS = {
-    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 'usd-coin',
-    '0xdac17f958d2ee523a2206206994597c13d831ec7': 'tether',
-    '0x6b175474e89094c44da98b954eedeac495271d0f': 'dai',
-    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 'ethereum',
-    '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599': 'wrapped-bitcoin',
+BINANCE_SYMBOLS = {
+    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 'ETHUSDT',
+    '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599': 'BTCUSDT',
+}
+STABLECOINS = {
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',  # USDC
+    '0xdac17f958d2ee523a2206206994597c13d831ec7',  # USDT
+    '0x6b175474e89094c44da98b954eedeac495271d0f',  # DAI
 }
 
 
 def get_prices(token_addresses):
-    """Get USD prices from CoinGecko (CEX-based, more accurate than on-chain)."""
-    ids = []
-    for addr in token_addresses:
-        cg_id = COINGECKO_IDS.get(addr.lower())
-        if cg_id:
-            ids.append(cg_id)
-    if not ids:
-        return {}
-    url = f'https://api.coingecko.com/api/v3/simple/price?ids={",".join(ids)}&vs_currencies=usd'
-    raw = fetch_json(url)
-    if not isinstance(raw, dict) or 'error' in raw:
-        # Fallback to 1inch Spot Price
-        data = {'tokens': token_addresses, 'currency': 'USD'}
-        return fetch_json(f'{INCH_API}/price/v1.1/1', headers=inch_headers(), data=data)
-    # Map back to addresses
+    """Get real-time USD prices from Binance (CEX, no delay)."""
     result = {}
     for addr in token_addresses:
-        cg_id = COINGECKO_IDS.get(addr.lower())
-        if cg_id and cg_id in raw:
-            result[addr.lower()] = raw[cg_id]['usd']
+        lower = addr.lower()
+        if lower in STABLECOINS:
+            result[lower] = 1.0
+        elif lower in BINANCE_SYMBOLS:
+            raw = fetch_json(
+                f'https://api.binance.com/api/v3/ticker/price?symbol={BINANCE_SYMBOLS[lower]}')
+            if isinstance(raw, dict) and 'price' in raw:
+                result[lower] = float(raw['price'])
     return result
 
 
