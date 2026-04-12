@@ -7,7 +7,7 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #e6edf3; min-height: 100vh; display: flex; justify-content: center; padding: 40px 16px; }
-  .app { width: 680px; }
+  .app { width: 960px; }
   h1 { font-size: 20px; color: #e6edf3; }
 
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 16px; padding: 16px; margin-bottom: 12px; }
@@ -34,8 +34,8 @@
   .btn-swap:hover { background: #2ea043; }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  .sources { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 12px; }
-  @media (max-width: 700px) { .sources { grid-template-columns: 1fr; } }
+  .sources { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  .src-card { flex: 1 1 180px; min-width: 160px; }
   .src-card { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 14px; position: relative; transition: border-color 0.3s; }
   .src-card.winner { border-color: #3fb950; }
   .src-card.winner::before {
@@ -248,15 +248,19 @@ async function getQuote() {
     const dp = d.prices?.dst || 0;
 
     let html = '<div class="sources">';
-    html += sourceCard('1inch_classic', '1inch Classic (30 bps)', 30, d.inch_classic, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_classic', dp);
-    html += sourceCard('1inch_fusion', '1inch Fusion (30 bps)', 30, d.inch_fusion, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_fusion', dp);
-    html += sourceCard('fynd', 'Fynd (10 bps)', 10, d.fynd, buy.dec, buy.symbol, amount, gp, d.winner === 'fynd', dp);
+    html += sourceCard('1inch_classic', '1inch Classic', 30, d.inch_classic, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_classic', dp);
+    html += sourceCard('1inch_fusion', '1inch Fusion', 30, d.inch_fusion, buy.dec, buy.symbol, amount, gp, d.winner === '1inch_fusion', dp);
+    html += sourceCard('fynd', 'Fynd', 10, d.fynd, buy.dec, buy.symbol, amount, gp, d.winner === 'fynd', dp);
+    html += sourceCard('kyberswap', 'KyberSwap', 0, d.kyberswap, buy.dec, buy.symbol, amount, gp, d.winner === 'kyberswap', dp);
+    html += sourceCard('cowswap', 'CowSwap', 0, d.cowswap, buy.dec, buy.symbol, amount, gp, d.winner === 'cowswap', dp);
     html += '</div>';
 
     // Routing quality comparison (quote = gross, fees are on-chain)
     const routing = [];
     if (d.inch_classic) routing.push({name: '1inch', out: parseFloat(d.inch_classic.amount_out)});
     if (d.fynd) routing.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out)});
+    if (d.kyberswap) routing.push({name: 'KyberSwap', out: parseFloat(d.kyberswap.amount_out)});
+    if (d.cowswap) routing.push({name: 'CowSwap', out: parseFloat(d.cowswap.amount_out)});
 
     if (routing.length >= 2) {
       routing.sort((a,b) => b.out - a.out);
@@ -277,6 +281,8 @@ async function getQuote() {
     if (d.inch_classic) exec.push({name: '1inch Classic', out: parseFloat(d.inch_classic.amount_out) * (1 - 0.003)});
     if (d.inch_fusion) exec.push({name: '1inch Fusion', out: parseFloat(d.inch_fusion.amount_out) * (1 - 0.003)});
     if (d.fynd) exec.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out) * (1 - 0.001)});
+    if (d.kyberswap) exec.push({name: 'KyberSwap', out: parseFloat(d.kyberswap.amount_out)});
+    if (d.cowswap) exec.push({name: 'CowSwap', out: parseFloat(d.cowswap.amount_out)});
 
     if (exec.length >= 2) {
       exec.sort((a,b) => b.out - a.out);

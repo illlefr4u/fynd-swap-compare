@@ -159,6 +159,28 @@ def get_fynd_swap(src, dst, amount, sender, slippage, gas_price='50000000'):
     return fetch_json(f'{FYND_URL}/v1/quote', data=data)
 
 
+def get_kyberswap_quote(src, dst, amount):
+    url = (f'https://aggregator-api.kyberswap.com/ethereum/api/v1/routes?'
+           f'tokenIn={src}&tokenOut={dst}&amountIn={amount}&gasInclude=true')
+    return fetch_json(url)
+
+
+def get_cowswap_quote(src, dst, amount, sender):
+    data = {
+        'sellToken': src, 'buyToken': dst,
+        'sellAmountBeforeFee': amount,
+        'from': sender, 'kind': 'sell',
+    }
+    return fetch_json('https://api.cow.fi/mainnet/api/v1/quote', data=data)
+
+
+def token_decimals(addr):
+    for info in TOKENS.values():
+        if info['addr'].lower() == addr.lower():
+            return info['dec']
+    return 18
+
+
 def token_symbol(addr):
     for sym, info in TOKENS.items():
         if info['addr'].lower() == addr.lower():
@@ -187,15 +209,19 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
     if isinstance(gas_data, dict) and 'medium' in gas_data:
         gas_price = gas_data['medium']['maxFeePerGas']
 
-    # Fetch all four in parallel (3 quotes + prices)
+    # Fetch all sources in parallel
     classic_f = executor.submit(get_inch_classic_quote, src, dst, amount)
     fusion_f = executor.submit(get_inch_fusion, src, dst, amount, sender)
     fynd_f = executor.submit(get_fynd_quote, src, dst, amount, sender, gas_price)
+    kyber_f = executor.submit(get_kyberswap_quote, src, dst, amount)
+    cow_f = executor.submit(get_cowswap_quote, src, dst, amount, sender)
     prices_f = executor.submit(get_prices, [src, dst])
 
     classic_raw = classic_f.result()
     fusion_raw = fusion_f.result()
     fynd_raw = fynd_f.result()
+    kyber_raw = kyber_f.result()
+    cow_raw = cow_f.result()
     prices_raw = prices_f.result()
 
     # Parse prices (API returns lowercase addresses)
@@ -242,11 +268,41 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
                     'solve_time_ms': fynd_raw.get('solve_time_ms', 0),
                 }
 
-    # Determine winner across all three
-    candidates = {}
-    # Winner = best execution price (after on-chain fees)
-    # Quote amounts are gross; fees deducted on-chain by smart contract
-    ON_CHAIN_FEE = {'1inch_classic': 0.003, '1inch_fusion': 0.003, 'fynd': 0.001}
+    # Parse KyberSwap
+    kyber_out = 0
+    kyber_info = {}
+    if isinstance(kyber_raw, dict):
+        rs = kyber_raw.get('data', {}).get('routeSummary', {})
+        if rs and rs.get('amountOut'):
+            kyber_out = int(rs['amountOut'])
+            kyber_info = {
+                'gas_estimate': str(rs.get('gas', '0')),
+                'gas_price': gas_price,
+            }
+
+    # Parse CowSwap
+    cow_out = 0
+    cow_info = {}
+    if isinstance(cow_raw, dict) and 'quote' in cow_raw:
+        q = cow_raw['quote']
+        cow_out = int(q.get('buyAmount', '0'))
+        cow_info = {
+            'gas_estimate': str(q.get('gasAmount', '0')),
+            'gas_price': str(q.get('gasPrice', gas_price)),
+            'fee_amount': q.get('feeAmount', '0'),
+        }
+
+    # On-chain fees per venue (deducted by smart contract at execution)
+    # CowSwap/KyberSwap: 0 bps protocol fee on output (fee is in sell token for CoW)
+    ON_CHAIN_FEE = {
+        '1inch_classic': 0.003,
+        '1inch_fusion': 0.003,
+        'fynd': 0.001,
+        'kyberswap': 0.0,
+        'cowswap': 0.0,
+    }
+
+    # Build candidates for execution comparison
     exec_candidates = {}
     if classic_out > 0:
         exec_candidates['1inch_classic'] = classic_out * (1 - ON_CHAIN_FEE['1inch_classic'])
@@ -254,10 +310,15 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
         exec_candidates['1inch_fusion'] = fusion_out * (1 - ON_CHAIN_FEE['1inch_fusion'])
     if fynd_out > 0:
         exec_candidates['fynd'] = fynd_out * (1 - ON_CHAIN_FEE['fynd'])
+    if kyber_out > 0:
+        exec_candidates['kyberswap'] = kyber_out * (1 - ON_CHAIN_FEE['kyberswap'])
+    if cow_out > 0:
+        exec_candidates['cowswap'] = cow_out * (1 - ON_CHAIN_FEE['cowswap'])
 
     if exec_candidates:
         winner = max(exec_candidates, key=exec_candidates.get)
-        best_out = max(classic_out, fusion_out, fynd_out)  # show gross for display
+        all_gross = [v for v in [classic_out, fusion_out, fynd_out, kyber_out, cow_out] if v > 0]
+        best_out = max(all_gross) if all_gross else 0
         worst_exec = min(exec_candidates.values())
         best_exec = exec_candidates[winner]
         diff_bps = (best_exec - worst_exec) / worst_exec * 10000 if worst_exec > 0 else 0
@@ -288,6 +349,14 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
             'amount_out': str(fynd_out), **fynd_info
         } if fynd_out > 0 else None,
         'fynd_error': str(fynd_raw) if fynd_out == 0 else None,
+        'kyberswap': {
+            'amount_out': str(kyber_out), **kyber_info
+        } if kyber_out > 0 else None,
+        'kyberswap_error': kyber_raw.get('error') if kyber_out == 0 else None,
+        'cowswap': {
+            'amount_out': str(cow_out), **cow_info
+        } if cow_out > 0 else None,
+        'cowswap_error': cow_raw.get('error') if cow_out == 0 else None,
         'diff_bps': round(diff_bps, 2),
         'prices': {
             'src': prices.get(src.lower()),
