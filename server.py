@@ -244,18 +244,23 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
 
     # Determine winner across all three
     candidates = {}
+    # Winner = best execution price (after on-chain fees)
+    # Quote amounts are gross; fees deducted on-chain by smart contract
+    ON_CHAIN_FEE = {'1inch_classic': 0.003, '1inch_fusion': 0.003, 'fynd': 0.001}
+    exec_candidates = {}
     if classic_out > 0:
-        candidates['1inch_classic'] = classic_out
+        exec_candidates['1inch_classic'] = classic_out * (1 - ON_CHAIN_FEE['1inch_classic'])
     if fusion_out > 0:
-        candidates['1inch_fusion'] = fusion_out
+        exec_candidates['1inch_fusion'] = fusion_out * (1 - ON_CHAIN_FEE['1inch_fusion'])
     if fynd_out > 0:
-        candidates['fynd'] = fynd_out
+        exec_candidates['fynd'] = fynd_out * (1 - ON_CHAIN_FEE['fynd'])
 
-    if candidates:
-        winner = max(candidates, key=candidates.get)
-        best_out = candidates[winner]
-        worst_out = min(candidates.values())
-        diff_bps = (best_out - worst_out) / worst_out * 10000 if worst_out > 0 else 0
+    if exec_candidates:
+        winner = max(exec_candidates, key=exec_candidates.get)
+        best_out = max(classic_out, fusion_out, fynd_out)  # show gross for display
+        worst_exec = min(exec_candidates.values())
+        best_exec = exec_candidates[winner]
+        diff_bps = (best_exec - worst_exec) / worst_exec * 10000 if worst_exec > 0 else 0
     else:
         winner = 'none'
         best_out = 0

@@ -163,16 +163,16 @@ function sourceCard(name, label, feeBps, data, buyDec, buySym, sellAmount, gasPr
   if (!data) return `<div class="src-card error-card"><div class="src-name">${label}</div><div class="status error" style="padding:8px;font-size:11px">unavailable</div></div>`;
 
   const outRaw = parseFloat(data.amount_out);
-  const outHuman = outRaw / Math.pow(10, buyDec);
+  const grossOut = outRaw / Math.pow(10, buyDec);  // quote = gross (fee is on-chain)
   const sellUsd = parseFloat(sellAmount);
 
-  // Reverse-engineer pre-fee output (routing quality)
-  const grossOut = outHuman / (1 - feeBps / 10000);
-  const feeLost = grossOut - outHuman;
+  // On-chain fee (deducted by smart contract at execution)
+  const feeLost = grossOut * feeBps / 10000;
+  const netOut = grossOut - feeLost;
   const feeUsd = dstPrice ? feeLost * dstPrice : sellUsd * feeBps / 10000;
 
-  // Execution price (what you actually get)
-  const execPrice = sellUsd / outHuman;
+  // Execution price (after on-chain fee)
+  const execPrice = sellUsd / netOut;
 
   const gasUnits = parseInt(data.gas_estimate || data.gas || '0');
   const gp = parseInt(data.gas_price || gasPrice || '50000000');
@@ -185,16 +185,14 @@ function sourceCard(name, label, feeBps, data, buyDec, buySym, sellAmount, gasPr
   let h = `<div class="src-card${isWinner ? ' winner' : ''}">`;
   h += `<div class="src-name">${label}</div>`;
 
-  // Gross output (routing quality)
-  h += `<div class="src-amount" style="font-size:14px;color:#8b949e;font-weight:400">Route: ${grossOut.toFixed(6)}</div>`;
-  // Net output (execution price)
-  h += `<div class="src-amount">${fmt(data.amount_out, buyDec)} ${displaySym}</div>`;
-  h += `<div class="src-price">1 ${displaySym} = $${execPrice.toFixed(2)}${data.receives_native_eth && name !== 'fynd' ? ' (native)' : ''}</div>`;
+  // Quote output (routing quality, pre on-chain fee)
+  h += `<div class="src-amount">${grossOut.toFixed(6)} ${displaySym}</div>`;
+  h += `<div class="src-price">after fee: ${netOut.toFixed(6)} | 1 ${displaySym} = $${execPrice.toFixed(2)}${data.receives_native_eth && name !== 'fynd' ? ' (native)' : ''}</div>`;
 
   h += `<div class="breakdown">`;
-  h += `<div class="bk"><span class="bk-l">Gross (pre-fee)</span><span class="bk-v">${grossOut.toFixed(6)}</span></div>`;
-  h += `<div class="bk"><span class="bk-l">Fee (${feeBps} bps)</span><span class="bk-v bad">-${feeLost.toFixed(6)} (~$${feeUsd.toFixed(2)})</span></div>`;
-  h += `<div class="bk"><span class="bk-l">Net output</span><span class="bk-v">${outHuman.toFixed(6)}</span></div>`;
+  h += `<div class="bk"><span class="bk-l">Quote (routing)</span><span class="bk-v">${grossOut.toFixed(6)}</span></div>`;
+  h += `<div class="bk"><span class="bk-l">On-chain fee (${feeBps} bps)</span><span class="bk-v bad">-${feeLost.toFixed(6)} (~$${feeUsd.toFixed(2)})</span></div>`;
+  h += `<div class="bk"><span class="bk-l">You receive</span><span class="bk-v">${netOut.toFixed(6)}</span></div>`;
 
   if (isGasless) {
     h += `<div class="bk"><span class="bk-l">Gas</span><span class="bk-v good">gasless</span></div>`;
@@ -255,30 +253,30 @@ async function getQuote() {
     html += sourceCard('fynd', 'Fynd (10 bps)', 10, d.fynd, buy.dec, buy.symbol, amount, gp, d.winner === 'fynd', dp);
     html += '</div>';
 
-    // Routing quality comparison (pre-fee gross output)
-    const FEE = {'1inch Classic': 0.003, '1inch Fusion': 0.003, 'Fynd': 0.001};
+    // Routing quality comparison (quote = gross, fees are on-chain)
     const routing = [];
-    if (d.inch_classic) routing.push({name: '1inch', gross: parseFloat(d.inch_classic.amount_out) / (1 - 0.003)});
-    if (d.fynd) routing.push({name: 'Fynd', gross: parseFloat(d.fynd.amount_out) / (1 - 0.001)});
+    if (d.inch_classic) routing.push({name: '1inch', out: parseFloat(d.inch_classic.amount_out)});
+    if (d.fynd) routing.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out)});
 
     if (routing.length >= 2) {
-      routing.sort((a,b) => b.gross - a.gross);
+      routing.sort((a,b) => b.out - a.out);
       const r = routing[0], r2 = routing[1];
-      const rdiff = (r.gross - r2.gross) / Math.pow(10, buy.dec);
-      const rbps = ((r.gross - r2.gross) / r2.gross * 10000).toFixed(1);
+      const rdiff = (r.out - r2.out) / Math.pow(10, buy.dec);
+      const rbps = ((r.out - r2.out) / r2.out * 10000).toFixed(1);
       html += `<div class="diff-bar" style="border-color:#1f6feb">
-        <div style="font-size:11px;color:#6e7681;margin-bottom:4px">ROUTING QUALITY (pre-fee)</div>
+        <div style="font-size:11px;color:#6e7681;margin-bottom:4px">ROUTING (quote output, before on-chain fee)</div>
         <span class="diff-val" style="color:#79c0ff">${r.name}</span> finds
         <span class="diff-val" style="color:#79c0ff">+${rdiff.toFixed(6)} ${buy.symbol}</span> better route
         (<span class="diff-val" style="color:#79c0ff">${rbps} bps</span>)
       </div>`;
     }
 
-    // Execution comparison (post-fee, what you actually get)
+    // Execution comparison (after on-chain fees: 1inch 30bps, Fynd 10bps)
+    const FEES = {'1inch Classic': 0.003, '1inch Fusion': 0.003, 'Fynd': 0.001};
     const exec = [];
-    if (d.inch_classic) exec.push({name: '1inch Classic', out: parseFloat(d.inch_classic.amount_out)});
-    if (d.inch_fusion) exec.push({name: '1inch Fusion', out: parseFloat(d.inch_fusion.amount_out)});
-    if (d.fynd) exec.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out)});
+    if (d.inch_classic) exec.push({name: '1inch Classic', out: parseFloat(d.inch_classic.amount_out) * (1 - 0.003)});
+    if (d.inch_fusion) exec.push({name: '1inch Fusion', out: parseFloat(d.inch_fusion.amount_out) * (1 - 0.003)});
+    if (d.fynd) exec.push({name: 'Fynd', out: parseFloat(d.fynd.amount_out) * (1 - 0.001)});
 
     if (exec.length >= 2) {
       exec.sort((a,b) => b.out - a.out);
@@ -286,7 +284,7 @@ async function getQuote() {
       const diff = (best.out - second.out) / Math.pow(10, buy.dec);
       const diffBps = ((best.out - second.out) / second.out * 10000).toFixed(1);
       html += `<div class="diff-bar">
-        <div style="font-size:11px;color:#6e7681;margin-bottom:4px">EXECUTION PRICE (post-fee)</div>
+        <div style="font-size:11px;color:#6e7681;margin-bottom:4px">EXECUTION (after on-chain fee: 1inch 30 bps, Fynd 10 bps)</div>
         <span class="diff-val">${best.name}</span> gives
         <span class="diff-val">+${diff.toFixed(6)} ${buy.symbol}</span> more
         (<span class="diff-val">${diffBps} bps</span>)
