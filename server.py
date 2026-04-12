@@ -96,10 +96,37 @@ def get_gas():
     return fetch_json(f'{INCH_API}/gas-price/v1.6/1', headers=inch_headers())
 
 
+COINGECKO_IDS = {
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 'usd-coin',
+    '0xdac17f958d2ee523a2206206994597c13d831ec7': 'tether',
+    '0x6b175474e89094c44da98b954eedeac495271d0f': 'dai',
+    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 'ethereum',
+    '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599': 'wrapped-bitcoin',
+}
+
+
 def get_prices(token_addresses):
-    """Get USD spot prices for tokens via 1inch Spot Price API."""
-    data = {'tokens': token_addresses, 'currency': 'USD'}
-    return fetch_json(f'{INCH_API}/price/v1.1/1', headers=inch_headers(), data=data)
+    """Get USD prices from CoinGecko (CEX-based, more accurate than on-chain)."""
+    ids = []
+    for addr in token_addresses:
+        cg_id = COINGECKO_IDS.get(addr.lower())
+        if cg_id:
+            ids.append(cg_id)
+    if not ids:
+        return {}
+    url = f'https://api.coingecko.com/api/v3/simple/price?ids={",".join(ids)}&vs_currencies=usd'
+    raw = fetch_json(url)
+    if not isinstance(raw, dict) or 'error' in raw:
+        # Fallback to 1inch Spot Price
+        data = {'tokens': token_addresses, 'currency': 'USD'}
+        return fetch_json(f'{INCH_API}/price/v1.1/1', headers=inch_headers(), data=data)
+    # Map back to addresses
+    result = {}
+    for addr in token_addresses:
+        cg_id = COINGECKO_IDS.get(addr.lower())
+        if cg_id and cg_id in raw:
+            result[addr.lower()] = raw[cg_id]['usd']
+    return result
 
 
 def get_inch_classic_quote(src, dst, amount):
