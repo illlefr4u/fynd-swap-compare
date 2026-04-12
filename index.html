@@ -152,9 +152,9 @@ async function fetchGas() {
     const r = await fetch('/api/gas');
     const d = await r.json();
     if (d.baseFee) {
-      const gwei = v => (parseInt(v) / 1e9).toFixed(4);
+      const gwei = v => (parseInt(v) / 1e9).toFixed(3);
       document.getElementById('gasVal').textContent =
-        `${gwei(d.baseFee)} Gwei (tip: +${gwei(d.low.maxPriorityFeePerGas)} low / +${gwei(d.medium.maxPriorityFeePerGas)} med / +${gwei(d.high.maxPriorityFeePerGas)} high)`;
+        `Low ${gwei(d.low.maxFeePerGas)} / Base ${gwei(d.baseFee)} / High ${gwei(d.high.maxFeePerGas)} Gwei`;
     }
   } catch(e) {}
 }
@@ -179,8 +179,9 @@ function sourceCard(name, label, feeBps, data, buyDec, buySym, sellAmount, gasPr
 
   let h = `<div class="src-card${isWinner ? ' winner' : ''}">`;
   h += `<div class="src-name">${label}</div>`;
+  const displaySym = (data.receives_native_eth && name !== 'fynd') ? 'ETH' : buySym;
   h += `<div class="src-amount">${fmt(data.amount_out, buyDec)}</div>`;
-  h += `<div class="src-price">1 ${buySym} = $${execPrice.toFixed(2)}</div>`;
+  h += `<div class="src-price">1 ${displaySym} = $${execPrice.toFixed(2)}${data.receives_native_eth && name !== 'fynd' ? ' (native ETH)' : ''}</div>`;
   h += `<div class="breakdown">`;
 
   h += `<div class="bk"><span class="bk-l">Infra fee</span><span class="bk-v bad">${feeBps} bps (~$${feeUsd.toFixed(2)})</span></div>`;
@@ -249,8 +250,11 @@ async function getQuote() {
 
     // Swap button
     if (account) {
-      const winLabel = d.winner.replace('1inch_classic','1inch Classic').replace('1inch_fusion','1inch Fusion').replace('fynd','Fynd');
-      html += `<button class="btn btn-swap" onclick="doSwap()">Swap via ${winLabel}</button>`;
+      // Fusion is quote-only; fall back to classic for execution
+      const execSource = d.winner === '1inch_fusion' ? '1inch_classic' : d.winner;
+      const winLabel = execSource.replace('1inch_classic','1inch Classic').replace('fynd','Fynd');
+      const note = d.winner === '1inch_fusion' ? ' (fusion is quote-only)' : '';
+      html += `<button class="btn btn-swap" onclick="doSwap('${execSource}')">Swap via ${winLabel}${note}</button>`;
     } else {
       html += `<button class="btn btn-swap" onclick="connectWallet()" style="background:#1f6feb">Connect wallet to swap</button>`;
     }
@@ -263,16 +267,17 @@ async function getQuote() {
   }
 }
 
-async function doSwap() {
+async function doSwap(execSource) {
   if (!account || !lastQuote) return;
   const area = document.getElementById('resultArea');
   const sell = sel('sellToken'), buy = sel('buyToken');
   const amount = document.getElementById('sellAmount').value;
   const slippage = document.getElementById('slippage').value;
+  const source = execSource || lastQuote.winner;
 
   area.innerHTML += '<div class="status"><span class="spinner"></span>Getting calldata...</div>';
   try {
-    const r = await fetch(`/api/swap?src=${sell.addr}&dst=${buy.addr}&amount=${toWei(amount, sell.dec)}&sender=${account}&slippage=${slippage}&source=${lastQuote.winner}`);
+    const r = await fetch(`/api/swap?src=${sell.addr}&dst=${buy.addr}&amount=${toWei(amount, sell.dec)}&sender=${account}&slippage=${slippage}&source=${source}`);
     const d = await r.json();
     if (d.error) { area.innerHTML += `<div class="status error">${d.error}</div>`; return; }
     if (d.tx) {

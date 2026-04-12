@@ -278,9 +278,11 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=os.path.dirname(__file__), **kwargs)
 
     def end_headers(self):
-        # Restrict CORS to localhost only (prevents external sites from using as proxy)
+        # Restrict CORS to exact localhost origins
         origin = self.headers.get('Origin', '')
-        if origin.startswith('http://localhost') or origin.startswith('http://127.0.0.1'):
+        allowed = {f'http://localhost:{PORT}', f'http://127.0.0.1:{PORT}',
+                    'http://localhost', 'http://127.0.0.1'}
+        if origin in allowed or re.match(r'^http://(localhost|127\.0\.0\.1)(:\d+)?$', origin):
             self.send_header('Access-Control-Allow-Origin', origin)
         self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
@@ -331,6 +333,14 @@ class Handler(SimpleHTTPRequestHandler):
 
         if not all([src, dst, amount]):
             return self._json({'error': 'missing src/dst/amount'}, 400)
+        if not _is_valid_address(src) or not _is_valid_address(dst):
+            return self._json({'error': 'invalid token address'}, 400)
+        if sender and not _is_valid_address(sender):
+            return self._json({'error': 'invalid sender address'}, 400)
+        try:
+            int(amount)
+        except ValueError:
+            return self._json({'error': 'amount must be integer (wei)'}, 400)
 
         try:
             slippage = float(self._p(parsed, 'slippage', '0.5'))
