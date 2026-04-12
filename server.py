@@ -96,6 +96,12 @@ def get_gas():
     return fetch_json(f'{INCH_API}/gas-price/v1.6/1', headers=inch_headers())
 
 
+def get_prices(token_addresses):
+    """Get USD spot prices for tokens via 1inch Spot Price API."""
+    data = {'tokens': token_addresses, 'currency': 'USD'}
+    return fetch_json(f'{INCH_API}/price/v1.1/1', headers=inch_headers(), data=data)
+
+
 def get_inch_classic_quote(src, dst, amount):
     """Get 1inch classic quote with gas estimate (no balance check needed)."""
     url = (f'{INCH_API}/swap/v6.1/1/quote?'
@@ -181,14 +187,22 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
     if isinstance(gas_data, dict) and 'medium' in gas_data:
         gas_price = gas_data['medium']['maxFeePerGas']
 
-    # Fetch all three in parallel
+    # Fetch all four in parallel (3 quotes + prices)
     classic_f = executor.submit(get_inch_classic_quote, src, dst, amount)
     fusion_f = executor.submit(get_inch_fusion, src, dst, amount, sender)
     fynd_f = executor.submit(get_fynd_quote, src, dst, amount, sender, gas_price)
+    prices_f = executor.submit(get_prices, [src, dst])
 
     classic_raw = classic_f.result()
     fusion_raw = fusion_f.result()
     fynd_raw = fynd_f.result()
+    prices_raw = prices_f.result()
+
+    # Parse prices (API returns lowercase addresses)
+    prices = {}
+    if isinstance(prices_raw, dict) and 'error' not in prices_raw:
+        for addr, price in prices_raw.items():
+            prices[addr.lower()] = float(price)
 
     # Parse 1inch classic (from quote endpoint with includeGas)
     classic_out = 0
@@ -270,6 +284,10 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
         } if fynd_out > 0 else None,
         'fynd_error': str(fynd_raw) if fynd_out == 0 else None,
         'diff_bps': round(diff_bps, 2),
+        'prices': {
+            'src': prices.get(src.lower()),
+            'dst': prices.get(dst.lower()),
+        },
     }
 
 

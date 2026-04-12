@@ -82,7 +82,7 @@
   <div class="gas-bar">Base fee: <span class="gas-val" id="gasVal">--</span></div>
 
   <div class="card">
-    <label>You sell</label>
+    <label>You sell <span id="sellUsd" style="float:right;color:#8b949e;font-weight:400;text-transform:none"></span></label>
     <div class="row">
       <select id="sellToken" class="token-select" onchange="clearResult()">
         <option value="USDC" data-addr="0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" data-dec="6">USDC</option>
@@ -94,7 +94,7 @@
       <input type="number" id="sellAmount" class="amount-input" value="5000" min="0" step="any" oninput="clearResult()">
       <div style="text-align:center">
         <label>Slippage</label>
-        <input type="number" id="slippage" class="slippage-input" value="0.5" min="0.01" max="50" step="0.1" oninput="clearResult()">
+        <input type="number" id="slippage" class="slippage-input" value="0.1" min="0.01" max="50" step="0.1" oninput="clearResult()">
       </div>
     </div>
   </div>
@@ -102,7 +102,7 @@
   <div class="swap-icon"><button onclick="flipTokens()">&#x2195;</button></div>
 
   <div class="card">
-    <label>You receive (best)</label>
+    <label>You receive (best) <span id="buyUsd" style="float:right;color:#8b949e;font-weight:400;text-transform:none"></span></label>
     <div class="row">
       <select id="buyToken" class="token-select" onchange="clearResult()">
         <option value="WETH" data-addr="0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2" data-dec="18">WETH</option>
@@ -221,6 +221,21 @@ async function getQuote() {
     lastQuote = d;
 
     document.getElementById('buyAmount').value = fmt(d.best_amount_out, buy.dec);
+
+    // Show USD values
+    if (d.prices) {
+      const srcPrice = d.prices.src;
+      const dstPrice = d.prices.dst;
+      if (srcPrice) {
+        const sellUsd = parseFloat(amount) * srcPrice;
+        document.getElementById('sellUsd').textContent = `$${sellUsd.toLocaleString('en-US', {maximumFractionDigits: 2})} | 1 ${sell.symbol} = $${srcPrice.toFixed(2)}`;
+      }
+      if (dstPrice) {
+        const bestHuman = parseFloat(d.best_amount_out) / Math.pow(10, buy.dec);
+        const buyUsd = bestHuman * dstPrice;
+        document.getElementById('buyUsd').textContent = `$${buyUsd.toLocaleString('en-US', {maximumFractionDigits: 2})} | 1 ${buy.symbol} = $${dstPrice.toFixed(2)}`;
+      }
+    }
 
     const gp = d.gas_price || '50000000';
 
