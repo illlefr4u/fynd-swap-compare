@@ -55,6 +55,13 @@ TOKENS = {
 }
 
 
+import re
+_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
+
+def _is_valid_address(addr):
+    return bool(_ADDR_RE.match(addr))
+
+
 def fetch_json(url, headers=None, data=None, timeout=15):
     try:
         h = headers or {}
@@ -202,20 +209,24 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
             'presets': list(fusion_raw.get('presets', {}).keys()),
         }
 
-    # Parse Fynd
+    # Parse Fynd (safe: check orders list before indexing)
     fynd_out = 0
     fynd_info = {}
-    if isinstance(fynd_raw, dict) and 'orders' in fynd_raw:
-        order = fynd_raw['orders'][0]
-        if order.get('status') == 'success':
-            fynd_out = int(order['amount_out'])
-            fynd_info = {
-                'gas_estimate': order['gas_estimate'],
-                'gas_price': order.get('gas_price', gas_price),
-                'route': ' -> '.join(s['protocol'] for s in order.get('route', {}).get('swaps', [])),
-                'block': order['block']['number'],
-                'solve_time_ms': fynd_raw.get('solve_time_ms', 0),
-            }
+    if isinstance(fynd_raw, dict):
+        orders = fynd_raw.get('orders', [])
+        if orders and isinstance(orders, list):
+            order = orders[0]
+            if order.get('status') == 'success':
+                fynd_out = int(order.get('amount_out', '0'))
+                fynd_info = {
+                    'gas_estimate': str(order.get('gas_estimate', '0')),
+                    'gas_price': str(order.get('gas_price', gas_price)),
+                    'route': ' -> '.join(
+                        s.get('protocol', '?')
+                        for s in order.get('route', {}).get('swaps', [])),
+                    'block': order.get('block', {}).get('number', 0),
+                    'solve_time_ms': fynd_raw.get('solve_time_ms', 0),
+                }
 
     # Determine winner across all three
     candidates = {}
@@ -245,7 +256,9 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
         'gas': gas_data,
         'gas_price': gas_price,
         'inch_classic': {
-            'amount_out': str(classic_out), **classic_info
+            'amount_out': str(classic_out),
+            'receives_native_eth': dst.lower() == WETH.lower(),
+            **classic_info,
         } if classic_out > 0 else None,
         'inch_classic_error': classic_raw.get('error') if classic_out == 0 else None,
         'inch_fusion': {
@@ -265,8 +278,11 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=os.path.dirname(__file__), **kwargs)
 
     def end_headers(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        # Restrict CORS to localhost only (prevents external sites from using as proxy)
+        origin = self.headers.get('Origin', '')
+        if origin.startswith('http://localhost') or origin.startswith('http://127.0.0.1'):
+            self.send_header('Access-Control-Allow-Origin', origin)
+        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         super().end_headers()
 
@@ -295,6 +311,14 @@ class Handler(SimpleHTTPRequestHandler):
         sender = self._p(parsed, 'sender', DEFAULT_SENDER)
         if not all([src, dst, amount]):
             return self._json({'error': 'missing src/dst/amount'}, 400)
+        if not _is_valid_address(src) or not _is_valid_address(dst):
+            return self._json({'error': 'invalid token address'}, 400)
+        if sender and not _is_valid_address(sender):
+            return self._json({'error': 'invalid sender address'}, 400)
+        try:
+            int(amount)
+        except ValueError:
+            return self._json({'error': 'amount must be integer (wei)'}, 400)
         result = compare_and_pick(src, dst, amount, sender)
         self._json(result)
 
@@ -303,16 +327,30 @@ class Handler(SimpleHTTPRequestHandler):
         dst = self._p(parsed, 'dst')
         amount = self._p(parsed, 'amount')
         sender = self._p(parsed, 'sender', DEFAULT_SENDER)
-        slippage = float(self._p(parsed, 'slippage', '0.5'))
-        source = self._p(parsed, 'source', '')  # force 1inch or fynd
+        source = self._p(parsed, 'source', '')
 
         if not all([src, dst, amount]):
             return self._json({'error': 'missing src/dst/amount'}, 400)
 
-        # First get best quote to decide source
+        try:
+            slippage = float(self._p(parsed, 'slippage', '0.5'))
+            if not (0.01 <= slippage <= 50):
+                return self._json({'error': 'slippage must be 0.01-50'}, 400)
+        except ValueError:
+            return self._json({'error': 'invalid slippage value'}, 400)
+
+        # Fusion is quote-only (no on-chain execution path available via API)
+        if source == '1inch_fusion':
+            return self._json({'source': '1inch_fusion',
+                               'error': 'Fusion is gasless intent-based: execution requires '
+                                        'EIP-712 signing flow (not yet implemented). '
+                                        'Use 1inch Classic or Fynd instead.'})
+
         if not source:
             quote = compare_and_pick(src, dst, amount, sender)
             source = quote['winner']
+            if source == '1inch_fusion':
+                source = '1inch_classic'  # fallback: fusion can't execute
 
         gas_data = get_gas()
         gas_price = '50000000'
@@ -324,7 +362,7 @@ class Handler(SimpleHTTPRequestHandler):
             if isinstance(raw, dict) and 'tx' in raw:
                 tx = raw['tx']
                 self._json({
-                    'source': '1inch',
+                    'source': '1inch_classic',
                     'tx': {
                         'from': tx['from'],
                         'to': tx['to'],
@@ -335,32 +373,36 @@ class Handler(SimpleHTTPRequestHandler):
                     'amount_out': raw.get('dstAmount', '0'),
                 })
             else:
-                self._json({'source': '1inch', 'error': raw.get('error', 'unknown')})
-        else:
+                self._json({'source': '1inch_classic',
+                            'error': raw.get('error', 'unknown') if isinstance(raw, dict) else str(raw)})
+        elif source == 'fynd':
             raw = get_fynd_swap(src, dst, amount, sender, slippage, gas_price)
-            if isinstance(raw, dict) and 'orders' in raw:
-                order = raw['orders'][0]
-                if order.get('transaction'):
-                    tx = order['transaction']
-                    self._json({
-                        'source': 'fynd',
-                        'tx': {
-                            'from': sender,
-                            'to': tx['to'],
-                            'data': tx['data'],
-                            'value': tx.get('value', '0x0'),
-                        },
-                        'amount_out': order['amount_out'],
-                    })
-                else:
-                    self._json({
-                        'source': 'fynd',
-                        'amount_out': order.get('amount_out', '0'),
-                        'error': 'no calldata returned (token approval needed?)',
-                        'raw_status': order.get('status'),
-                    })
+            if not isinstance(raw, dict) or 'orders' not in raw:
+                return self._json({'source': 'fynd', 'error': str(raw)})
+            orders = raw.get('orders', [])
+            if not orders:
+                return self._json({'source': 'fynd', 'error': 'empty orders response'})
+            order = orders[0]
+            if order.get('transaction'):
+                tx = order['transaction']
+                self._json({
+                    'source': 'fynd',
+                    'tx': {
+                        'from': sender,
+                        'to': tx['to'],
+                        'data': tx['data'],
+                        'value': tx.get('value', '0x0'),
+                    },
+                    'amount_out': order.get('amount_out', '0'),
+                })
             else:
-                self._json({'source': 'fynd', 'error': str(raw)})
+                self._json({
+                    'source': 'fynd',
+                    'amount_out': order.get('amount_out', '0'),
+                    'error': 'no calldata returned (token approval needed?)',
+                })
+        else:
+            self._json({'error': f'unknown source: {source}'}, 400)
 
     def _json(self, data, status=200):
         self.send_response(status)
