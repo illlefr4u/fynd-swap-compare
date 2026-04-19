@@ -701,14 +701,16 @@ class Handler(SimpleHTTPRequestHandler):
             source = quote['winner']
             if source in ('1inch_fusion', 'cowswap'):
                 # Intent-based winner can't execute via this endpoint.
-                # Rank executable venues by NET output (gross - on-chain fee).
+                # Rank executable venues by NET output using integer bps math
+                # (avoids float precision loss on >2^53 wei amounts).
                 EXECUTABLE = ('1inch_classic', 'fynd', 'kyberswap', 'enso', 'openocean')
-                best, best_net = '1inch_classic', 0.0
+                best, best_net = '1inch_classic', 0
                 for s in EXECUTABLE:
                     key = 'inch_classic' if s == '1inch_classic' else s
                     v = quote.get(key)
                     if v:
-                        net = int(v.get('amount_out', 0)) * (1 - ON_CHAIN_FEE.get(s, 0))
+                        fee_bps = int(round(ON_CHAIN_FEE.get(s, 0) * 10000))
+                        net = int(v.get('amount_out', 0)) * (10000 - fee_bps)
                         if net > best_net:
                             best_net = net
                             best = s

@@ -405,19 +405,20 @@ async function getQuote() {
       let execSource = d.winner;
       let note = '';
       if (INTENT_BASED.has(d.winner)) {
-        // Rank executable venues by NET output (gross × (1 - on-chain fee)).
+        // Rank executable venues by NET output using integer bps math
+        // (BigInt throughout — avoids float precision loss on wei amounts).
         // Mirror of ON_CHAIN_FEE in server.py — keep in sync.
-        const FEE = {
-          '1inch_classic': 0.003, 'fynd': 0.001, 'kyberswap': 0,
-          'enso': 0, 'openocean': 0,
+        const FEE_BPS = {
+          '1inch_classic': 30n, 'fynd': 10n, 'kyberswap': 0n,
+          'enso': 0n, 'openocean': 0n,
         };
         const executable = ['1inch_classic', 'fynd', 'kyberswap', 'enso', 'openocean'];
-        let best = '1inch_classic', bestNet = 0;
+        let best = '1inch_classic', bestNet = 0n;
         for (const s of executable) {
           const key = s === '1inch_classic' ? 'inch_classic' : s;
           const v = d[key];
           if (v) {
-            const net = Number(BigInt(v.amount_out || 0)) * (1 - (FEE[s] || 0));
+            const net = BigInt(v.amount_out || 0) * (10000n - (FEE_BPS[s] || 0n));
             if (net > bestNet) { bestNet = net; best = s; }
           }
         }
