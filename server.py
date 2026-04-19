@@ -35,6 +35,10 @@ if _env_path.exists():
 ONEINCH_API_KEY = os.environ.get('ONEINCH_API_KEY', '')
 PORT = int(os.environ.get('PORT', '8899'))
 INCH_API = 'https://api.1inch.dev'
+# 1inch Commercial API ToU: requests should include `origin` (end-user wallet).
+# Set INCH_ORIGIN in .env (gitignored) for /quote calls where no per-request
+# wallet is available. /swap and /fusion use the per-request `sender` as origin.
+INCH_ORIGIN = os.environ.get('INCH_ORIGIN', '')
 FYND_URL = os.environ.get('FYND_URL', 'http://localhost:3000')
 DEFAULT_SENDER = os.environ.get('DEFAULT_SENDER', '')
 WETH = '0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2'
@@ -126,22 +130,26 @@ def get_inch_classic_quote(src, dst, amount):
     """Get 1inch classic quote with gas estimate (no balance check needed)."""
     url = (f'{INCH_API}/swap/v6.1/1/quote?'
            f'src={inch_addr(src)}&dst={inch_addr(dst)}&amount={amount}&includeGas=true')
+    if INCH_ORIGIN:
+        url += f'&origin={INCH_ORIGIN}'
     return fetch_json(url, headers=inch_headers())
 
 
 def get_inch_classic_swap(src, dst, amount, sender, slippage=0.5):
-    """Get 1inch classic swap calldata (for execution)."""
+    """Get 1inch classic swap calldata (for execution). origin=sender per ToU."""
     url = (f'{INCH_API}/swap/v6.1/1/swap?'
            f'src={inch_addr(src)}&dst={inch_addr(dst)}&amount={amount}'
-           f'&from={sender}&slippage={slippage}&disableEstimate=true')
+           f'&from={sender}&slippage={slippage}&disableEstimate=true'
+           f'&origin={sender}')
     return fetch_json(url, headers=inch_headers())
 
 
 def get_inch_fusion(src, dst, amount, sender):
-    """Get 1inch fusion (gasless intent) quote."""
+    """Get 1inch fusion (gasless intent) quote. origin=sender per ToU."""
     url = (f'{INCH_API}/fusion/quoter/v2.0/1/quote/receive?'
            f'fromTokenAddress={src}&toTokenAddress={dst}'
-           f'&amount={amount}&walletAddress={sender}&enableEstimate=true')
+           f'&amount={amount}&walletAddress={sender}&enableEstimate=true'
+           f'&origin={sender}')
     return fetch_json(url, headers=inch_headers())
 
 
