@@ -405,15 +405,20 @@ async function getQuote() {
       let execSource = d.winner;
       let note = '';
       if (INTENT_BASED.has(d.winner)) {
-        // Pick best executable by amount_out (not first available).
+        // Rank executable venues by NET output (gross × (1 - on-chain fee)).
+        // Mirror of ON_CHAIN_FEE in server.py — keep in sync.
+        const FEE = {
+          '1inch_classic': 0.003, 'fynd': 0.001, 'kyberswap': 0,
+          'enso': 0, 'openocean': 0,
+        };
         const executable = ['1inch_classic', 'fynd', 'kyberswap', 'enso', 'openocean'];
-        let best = '1inch_classic', bestAmt = 0n;
+        let best = '1inch_classic', bestNet = 0;
         for (const s of executable) {
           const key = s === '1inch_classic' ? 'inch_classic' : s;
           const v = d[key];
-          if (v && BigInt(v.amount_out || 0) > bestAmt) {
-            bestAmt = BigInt(v.amount_out);
-            best = s;
+          if (v) {
+            const net = Number(BigInt(v.amount_out || 0)) * (1 - (FEE[s] || 0));
+            if (net > bestNet) { bestNet = net; best = s; }
           }
         }
         execSource = best;

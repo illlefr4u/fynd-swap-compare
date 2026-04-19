@@ -35,6 +35,18 @@ if _env_path.exists():
 ONEINCH_API_KEY = os.environ.get('ONEINCH_API_KEY', '')
 PORT = int(os.environ.get('PORT', '8899'))
 INCH_API = 'https://api.1inch.dev'
+# Per-source on-chain fees (deducted by smart contract at execution).
+# Used to rank executable venues by NET output, not gross. Mirrored to JS
+# in index.html — keep both in sync if values change.
+ON_CHAIN_FEE = {
+    '1inch_classic': 0.003,
+    '1inch_fusion': 0.003,
+    'fynd': 0.001,
+    'kyberswap': 0.0,
+    'cowswap': 0.0,
+    'enso': 0.0,
+    'openocean': 0.0,
+}
 # 1inch Commercial API ToU: requests should include `origin` (end-user wallet).
 # Set INCH_ORIGIN in .env (gitignored) for /quote calls where no per-request
 # wallet is available. /swap and /fusion use the per-request `sender` as origin.
@@ -511,19 +523,7 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
                 'gas_price': gas_price,
             }
 
-    # On-chain fees per venue (deducted by smart contract at execution)
-    # CowSwap/KyberSwap: 0 bps protocol fee on output (fee is in sell token for CoW)
-    ON_CHAIN_FEE = {
-        '1inch_classic': 0.003,
-        '1inch_fusion': 0.003,
-        'fynd': 0.001,
-        'kyberswap': 0.0,
-        'cowswap': 0.0,
-        'enso': 0.0,
-        'openocean': 0.0,
-    }
-
-    # Build candidates for execution comparison
+    # Build candidates for execution comparison (uses module-level ON_CHAIN_FEE)
     all_sources = {
         '1inch_classic': classic_out,
         '1inch_fusion': fusion_out,
@@ -701,15 +701,17 @@ class Handler(SimpleHTTPRequestHandler):
             source = quote['winner']
             if source in ('1inch_fusion', 'cowswap'):
                 # Intent-based winner can't execute via this endpoint.
-                # Pick best executable by amount_out from quote.
+                # Rank executable venues by NET output (gross - on-chain fee).
                 EXECUTABLE = ('1inch_classic', 'fynd', 'kyberswap', 'enso', 'openocean')
-                best, best_amt = '1inch_classic', 0
+                best, best_net = '1inch_classic', 0.0
                 for s in EXECUTABLE:
                     key = 'inch_classic' if s == '1inch_classic' else s
                     v = quote.get(key)
-                    if v and int(v.get('amount_out', 0)) > best_amt:
-                        best_amt = int(v['amount_out'])
-                        best = s
+                    if v:
+                        net = int(v.get('amount_out', 0)) * (1 - ON_CHAIN_FEE.get(s, 0))
+                        if net > best_net:
+                            best_net = net
+                            best = s
                 source = best
 
         gas_data = get_gas()
