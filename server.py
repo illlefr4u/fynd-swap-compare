@@ -126,12 +126,14 @@ def get_prices(token_addresses):
     return result
 
 
-def get_inch_classic_quote(src, dst, amount):
-    """Get 1inch classic quote with gas estimate (no balance check needed)."""
+def get_inch_classic_quote(src, dst, amount, sender=None):
+    """Get 1inch classic quote with gas estimate (no balance check needed).
+    origin=sender per ToU; falls back to INCH_ORIGIN env when no sender."""
     url = (f'{INCH_API}/swap/v6.1/1/quote?'
            f'src={inch_addr(src)}&dst={inch_addr(dst)}&amount={amount}&includeGas=true')
-    if INCH_ORIGIN:
-        url += f'&origin={INCH_ORIGIN}'
+    origin = sender or INCH_ORIGIN
+    if origin:
+        url += f'&origin={origin}'
     return fetch_json(url, headers=inch_headers())
 
 
@@ -250,7 +252,7 @@ def compare_and_pick(src, dst, amount, sender, slippage=0.5):
     amount_human = str(int(amount) / (10 ** src_dec))
 
     # Fetch all sources in parallel
-    classic_f = executor.submit(get_inch_classic_quote, src, dst, amount)
+    classic_f = executor.submit(get_inch_classic_quote, src, dst, amount, sender)
     fusion_f = executor.submit(get_inch_fusion, src, dst, amount, sender)
     fynd_f = executor.submit(get_fynd_quote, src, dst, amount, sender, gas_price)
     kyber_f = executor.submit(get_kyberswap_quote, src, dst, amount)
