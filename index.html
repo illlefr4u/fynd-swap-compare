@@ -115,6 +115,15 @@
     </div>
   </div>
 
+  <div class="card" style="padding:10px 14px">
+    <label style="font-size:11px">Add custom token (paste address)</label>
+    <div class="row" style="gap:8px">
+      <input type="text" id="customTokenAddr" class="amount-input" placeholder="0x..." style="flex:1" />
+      <button class="btn btn-quote" style="width:auto;padding:8px 16px;font-size:13px" onclick="addCustomToken()">Add</button>
+    </div>
+    <div id="customTokenStatus" style="font-size:11px;color:#8b949e;margin-top:6px"></div>
+  </div>
+
   <button class="btn btn-quote" id="quoteBtn" onclick="getQuote()">Get Best Price</button>
   <div id="resultArea"></div>
 </div>
@@ -138,6 +147,77 @@ function toWei(a, d) { return BigInt(Math.round(parseFloat(a) * Math.pow(10, d))
 function clearResult() { document.getElementById('resultArea').innerHTML = ''; lastQuote = null; document.getElementById('buyAmount').value = ''; }
 function flipTokens() { const s = document.getElementById('sellToken'), b = document.getElementById('buyToken'), sv = s.value; s.value = b.value; b.value = sv; clearResult(); }
 
+const CUSTOM_TOKEN_KEY = 'swap_compare_custom_tokens';
+
+function loadCustomTokens() {
+  try { return JSON.parse(localStorage.getItem(CUSTOM_TOKEN_KEY) || '[]'); }
+  catch (e) { return []; }
+}
+
+function saveCustomTokens(list) {
+  try { localStorage.setItem(CUSTOM_TOKEN_KEY, JSON.stringify(list)); }
+  catch (e) { /* ignore */ }
+}
+
+function addTokenOptionToSelect(selectId, info, selectIt) {
+  const sel = document.getElementById(selectId);
+  // Skip if already present (by address, case-insensitive)
+  for (const opt of sel.options) {
+    if (opt.dataset.addr && opt.dataset.addr.toLowerCase() === info.addr.toLowerCase()) {
+      if (selectIt) sel.value = opt.value;
+      return;
+    }
+  }
+  const opt = document.createElement('option');
+  const label = info.symbol.length > 12 ? info.symbol.slice(0, 12) : info.symbol;
+  opt.value = label + '_' + info.addr.slice(2, 6).toUpperCase();
+  opt.textContent = label + ' (custom)';
+  opt.dataset.addr = info.addr;
+  opt.dataset.dec = String(info.decimals);
+  sel.appendChild(opt);
+  if (selectIt) sel.value = opt.value;
+}
+
+function registerCustomToken(info, selectIt) {
+  addTokenOptionToSelect('sellToken', info, selectIt);
+  addTokenOptionToSelect('buyToken', info, false);
+}
+
+async function addCustomToken() {
+  const input = document.getElementById('customTokenAddr');
+  const status = document.getElementById('customTokenStatus');
+  const addr = (input.value || '').trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
+    status.textContent = 'Invalid address format';
+    status.style.color = '#f85149';
+    return;
+  }
+  status.textContent = 'Loading metadata...';
+  status.style.color = '#8b949e';
+  try {
+    const r = await fetch(`/api/token?addr=${addr}`);
+    const info = await r.json();
+    if (info.error) {
+      status.textContent = 'Error: ' + info.error;
+      status.style.color = '#f85149';
+      return;
+    }
+    registerCustomToken(info, true);
+    const persisted = loadCustomTokens();
+    if (!persisted.find(t => t.addr.toLowerCase() === info.addr.toLowerCase())) {
+      persisted.push(info);
+      saveCustomTokens(persisted);
+    }
+    status.textContent = `Added ${info.symbol} (${info.decimals} decimals) — selected as sell token`;
+    status.style.color = '#3fb950';
+    input.value = '';
+    clearResult();
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = '#f85149';
+  }
+}
+
 async function connectWallet() {
   if (!window.ethereum) { alert('Rabby/MetaMask not found'); return; }
   try {
@@ -158,6 +238,9 @@ async function fetchGas() {
     }
   } catch(e) {}
 }
+
+// Sources that backend can build a tx for (intent-based ones excluded).
+const EXECUTABLE_SOURCES = new Set(['1inch_classic', 'fynd', 'kyberswap', 'enso', 'openocean']);
 
 function sourceCard(name, label, feeBps, data, buyDec, buySym, sellAmount, gasPrice, isWinner, dstPrice) {
   if (!data) return `<div class="src-card error-card"><div class="src-name">${label}</div><div class="status error" style="padding:8px;font-size:11px">unavailable</div></div>`;
@@ -182,7 +265,11 @@ function sourceCard(name, label, feeBps, data, buyDec, buySym, sellAmount, gasPr
   const isGasless = name === '1inch_fusion';
   const displaySym = (data.receives_native_eth && name !== 'fynd') ? 'ETH' : buySym;
 
-  let h = `<div class="src-card${isWinner ? ' winner' : ''}">`;
+  const canExec = EXECUTABLE_SOURCES.has(name) && account;
+  const clickAttr = canExec
+    ? ` onclick="doSwap('${name}')" style="cursor:pointer" title="Swap via ${label}"`
+    : '';
+  let h = `<div class="src-card${isWinner ? ' winner' : ''}"${clickAttr}>`;
   h += `<div class="src-name">${label}</div>`;
 
   // Quote output (routing quality, pre on-chain fee)
@@ -303,12 +390,28 @@ async function getQuote() {
       </div>`;
     }
 
-    // Swap button
+    // Swap button — fall back to first executable source if winner is intent-based
     if (account) {
-      // Fusion is quote-only; fall back to classic for execution
-      const execSource = d.winner === '1inch_fusion' ? '1inch_classic' : d.winner;
-      const winLabel = execSource.replace('1inch_classic','1inch Classic').replace('fynd','Fynd');
-      const note = d.winner === '1inch_fusion' ? ' (fusion is quote-only)' : '';
+      const INTENT_BASED = new Set(['1inch_fusion', 'cowswap']);
+      const LABELS = {
+        '1inch_classic': '1inch Classic',
+        '1inch_fusion': '1inch Fusion',
+        'fynd': 'Fynd',
+        'kyberswap': 'KyberSwap',
+        'cowswap': 'CowSwap',
+        'enso': 'Enso',
+        'openocean': 'OpenOcean',
+      };
+      let execSource = d.winner;
+      let note = '';
+      if (INTENT_BASED.has(d.winner)) {
+        // Pick best executable from comparison list
+        const order = ['1inch_classic', 'fynd', 'kyberswap', 'enso', 'openocean'];
+        const fallback = order.find(s => d[s === '1inch_classic' ? 'inch_classic' : s]);
+        execSource = fallback || '1inch_classic';
+        note = ` (${LABELS[d.winner]} is intent-based, click any card to choose)`;
+      }
+      const winLabel = LABELS[execSource] || execSource;
       html += `<button class="btn btn-swap" onclick="doSwap('${execSource}')">Swap via ${winLabel}${note}</button>`;
     } else {
       html += `<button class="btn btn-swap" onclick="connectWallet()" style="background:#1f6feb">Connect wallet to swap</button>`;
@@ -322,6 +425,21 @@ async function getQuote() {
   }
 }
 
+async function waitForReceipt(txHash, maxSeconds = 180) {
+  const startMs = Date.now();
+  while (Date.now() - startMs < maxSeconds * 1000) {
+    try {
+      const receipt = await window.ethereum.request({
+        method: 'eth_getTransactionReceipt',
+        params: [txHash],
+      });
+      if (receipt) return receipt;
+    } catch (e) { /* keep polling */ }
+    await new Promise(r => setTimeout(r, 2500));
+  }
+  return null;
+}
+
 async function doSwap(execSource) {
   if (!account || !lastQuote) return;
   const area = document.getElementById('resultArea');
@@ -329,14 +447,47 @@ async function doSwap(execSource) {
   const amount = document.getElementById('sellAmount').value;
   const slippage = document.getElementById('slippage').value;
   const source = execSource || lastQuote.winner;
+  const swapUrl = `/api/swap?src=${sell.addr}&dst=${buy.addr}&amount=${toWei(amount, sell.dec)}&sender=${account}&slippage=${slippage}&source=${source}`;
 
   area.innerHTML += '<div class="status"><span class="spinner"></span>Getting calldata...</div>';
   try {
-    const r = await fetch(`/api/swap?src=${sell.addr}&dst=${buy.addr}&amount=${toWei(amount, sell.dec)}&sender=${account}&slippage=${slippage}&source=${source}`);
-    const d = await r.json();
+    let r = await fetch(swapUrl);
+    let d = await r.json();
     if (d.error) { area.innerHTML += `<div class="status error">${d.error}</div>`; return; }
+
+    // Approval flow: if backend reports insufficient allowance, dispatch approve first.
+    if (d.approval) {
+      const note = d.approval_check_failed
+        ? ' (allowance check via RPC failed, approving defensively)'
+        : '';
+      area.innerHTML += `<div class="status">Approval required${note}. Confirm in Rabby...</div>`;
+      const approveHash = await window.ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: account,
+          to: d.approval.to,
+          data: d.approval.data,
+          value: '0x0',
+        }],
+      });
+      area.innerHTML += `<div class="status">Approve tx <a href="https://etherscan.io/tx/${approveHash}" target="_blank" style="color:#58a6ff">${approveHash.slice(0,14)}...</a> sent. Waiting for confirmation...</div>`;
+      const receipt = await waitForReceipt(approveHash);
+      if (!receipt || receipt.status !== '0x1') {
+        area.innerHTML += '<div class="status error">Approval not confirmed within 3 minutes — aborting swap</div>';
+        return;
+      }
+      area.innerHTML += '<div class="status">Approval confirmed. Re-fetching swap calldata...</div>';
+      r = await fetch(swapUrl);
+      d = await r.json();
+      if (d.error) { area.innerHTML += `<div class="status error">${d.error}</div>`; return; }
+      if (d.approval) {
+        area.innerHTML += '<div class="status error">Approval still insufficient after confirmation — aborting</div>';
+        return;
+      }
+    }
+
     if (d.tx) {
-      area.innerHTML += '<div class="status"><span class="spinner"></span>Confirm in Rabby...</div>';
+      area.innerHTML += '<div class="status"><span class="spinner"></span>Confirm swap in Rabby...</div>';
       const txHash = await window.ethereum.request({
         method: 'eth_sendTransaction',
         params: [{ from: account, to: d.tx.to, data: d.tx.data, value: d.tx.value ? ('0x' + parseInt(d.tx.value).toString(16)) : '0x0' }]
@@ -345,6 +496,9 @@ async function doSwap(execSource) {
     }
   } catch(e) { area.innerHTML += `<div class="status error">${e.message}</div>`; }
 }
+
+// Restore previously-added custom tokens from localStorage
+loadCustomTokens().forEach(t => registerCustomToken(t, false));
 
 fetchGas(); setInterval(fetchGas, 30000);
 if (window.ethereum?.selectedAddress) {

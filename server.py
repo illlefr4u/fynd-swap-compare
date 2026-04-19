@@ -41,6 +41,7 @@ INCH_API = 'https://api.1inch.dev'
 INCH_ORIGIN = os.environ.get('INCH_ORIGIN', '')
 FYND_URL = os.environ.get('FYND_URL', 'http://localhost:3000')
 DEFAULT_SENDER = os.environ.get('DEFAULT_SENDER', '')
+RPC_URL = os.environ.get('RPC_URL', 'https://rpc.mevblocker.io')
 WETH = '0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2'
 ETH_NATIVE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
 
@@ -64,6 +65,128 @@ _ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
 
 def _is_valid_address(addr):
     return bool(_ADDR_RE.match(addr))
+
+
+def _hex_pad(value, length=32):
+    """Hex-encode an int as left-padded fixed-width bytes (no 0x prefix)."""
+    return f'{int(value):0{length * 2}x}'
+
+
+def _addr_pad(addr):
+    """ABI-encode an address (20 bytes) into a 32-byte slot (no 0x prefix)."""
+    return ('0' * 24) + addr.lower().replace('0x', '')
+
+
+def eth_call(to, data, rpc_url=None):
+    """Single eth_call against an RPC endpoint. Returns hex result string or None on failure."""
+    url = rpc_url or RPC_URL
+    payload = {
+        'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call',
+        'params': [{'to': to, 'data': data}, 'latest'],
+    }
+    raw = fetch_json(url, data=payload, timeout=8)
+    if isinstance(raw, dict) and 'result' in raw and isinstance(raw['result'], str):
+        return raw['result']
+    return None
+
+
+def get_allowance(token, owner, spender):
+    """ERC20 allowance(owner, spender). Returns int or None on RPC failure."""
+    selector = '0xdd62ed3e'
+    data = selector + _addr_pad(owner) + _addr_pad(spender)
+    result = eth_call(token, data)
+    if result is None or not result.startswith('0x'):
+        return None
+    try:
+        return int(result, 16)
+    except ValueError:
+        return None
+
+
+def build_approve_tx(token, spender, amount):
+    """Build ERC20 approve(spender, amount) calldata. Returns dict with from omitted."""
+    selector = '095ea7b3'
+    data = '0x' + selector + _addr_pad(spender) + _hex_pad(int(amount))
+    return {'to': token, 'data': data, 'value': '0'}
+
+
+def _decode_abi_string(hex_data):
+    """Decode an eth_call result as either ABI-encoded string or bytes32 fallback."""
+    if not hex_data or hex_data == '0x':
+        return ''
+    h = hex_data[2:] if hex_data.startswith('0x') else hex_data
+    # ABI string: 32-byte offset, 32-byte length, then data (right-padded to 32-byte chunks).
+    if len(h) >= 128:
+        try:
+            offset = int(h[:64], 16)
+            if offset == 32:
+                length = int(h[64:128], 16)
+                if 0 < length <= 256 and len(h) >= 128 + length * 2:
+                    return bytes.fromhex(h[128:128 + length * 2]).decode('utf-8', errors='replace')
+        except (ValueError, UnicodeDecodeError):
+            pass
+    # bytes32 fallback (legacy MKR/etc): right-padded with NULs.
+    try:
+        return bytes.fromhex(h[:64]).rstrip(b'\x00').decode('utf-8', errors='replace')
+    except (ValueError, UnicodeDecodeError):
+        return ''
+
+
+_TOKEN_INFO_CACHE = {}
+
+
+def get_token_info(addr):
+    """Fetch ERC20 metadata (decimals / symbol / name) for an unknown token via RPC."""
+    key = addr.lower()
+    if key in _TOKEN_INFO_CACHE:
+        return _TOKEN_INFO_CACHE[key]
+    if not _is_valid_address(addr):
+        return {'error': 'invalid address'}
+    decimals_raw = eth_call(addr, '0x313ce567')  # decimals()
+    if not decimals_raw or decimals_raw == '0x':
+        return {'error': 'decimals() reverted (not ERC20?)'}
+    try:
+        decimals = int(decimals_raw, 16)
+    except ValueError:
+        return {'error': 'invalid decimals response'}
+    if decimals > 32:
+        return {'error': f'decimals out of range: {decimals}'}
+    symbol_raw = eth_call(addr, '0x95d89b41')  # symbol()
+    name_raw = eth_call(addr, '0x06fdde03')    # name()
+    info = {
+        'addr': addr,
+        'decimals': decimals,
+        'symbol': _decode_abi_string(symbol_raw or '') or addr[:10],
+        'name': _decode_abi_string(name_raw or '') or '',
+    }
+    _TOKEN_INFO_CACHE[key] = info
+    return info
+
+
+def attach_approval_if_needed(response, src, sender, amount):
+    """Mutate a swap response to include an `approval` field when allowance is insufficient.
+
+    For native ETH src, no approval is needed (no allowance concept).
+    For ERC20 src, queries `allowance(sender, tx.to)` via RPC. If < amount, attaches
+    `{approval: {to, data, value}}` so the frontend can dispatch approve → swap.
+    On RPC failure, attaches approval defensively (better safe than reverting onchain).
+    """
+    if src.lower() == ETH_NATIVE.lower():
+        return
+    tx = response.get('tx') if isinstance(response, dict) else None
+    if not isinstance(tx, dict) or 'to' not in tx:
+        return
+    spender = tx['to']
+    amt_int = int(amount)
+    current = get_allowance(src, sender, spender)
+    if current is None:
+        # RPC failed — attach approval defensively + flag
+        response['approval'] = build_approve_tx(src, spender, amt_int)
+        response['approval_check_failed'] = True
+        return
+    if current < amt_int:
+        response['approval'] = build_approve_tx(src, spender, amt_int)
+        response['allowance_current'] = str(current)
 
 
 def fetch_json(url, headers=None, data=None, timeout=15):
@@ -189,6 +312,20 @@ def get_kyberswap_quote(src, dst, amount):
     return fetch_json(url)
 
 
+def get_kyberswap_build(route_summary, sender, slippage_pct):
+    """KyberSwap two-step: routes (quote) -> route/build (calldata)."""
+    body = {
+        'routeSummary': route_summary,
+        'sender': sender,
+        'recipient': sender,
+        'slippageTolerance': int(round(slippage_pct * 100)),  # pct -> bps
+    }
+    return fetch_json(
+        'https://aggregator-api.kyberswap.com/ethereum/api/v1/route/build',
+        data=body,
+    )
+
+
 def get_cowswap_quote(src, dst, amount, sender):
     data = {
         'sellToken': src, 'buyToken': dst,
@@ -209,6 +346,15 @@ def get_openocean_quote(src, dst, amount_human):
     url = (f'https://open-api.openocean.finance/v4/1/quote?'
            f'inTokenAddress={src}&outTokenAddress={dst}'
            f'&amount={amount_human}&gasPrice=50000000')
+    return fetch_json(url)
+
+
+def get_openocean_swap(src, dst, amount_human, sender, slippage_pct, gas_gwei=50):
+    """OpenOcean swap (calldata). amount human-readable, slippage in %, gas in gwei."""
+    url = (f'https://open-api.openocean.finance/v4/1/swap?'
+           f'inTokenAddress={src}&outTokenAddress={dst}'
+           f'&amount={amount_human}&gasPrice={gas_gwei}'
+           f'&slippage={slippage_pct}&account={sender}')
     return fetch_json(url)
 
 
@@ -460,6 +606,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', origin)
         self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        # Disable browser caching so frontend changes are picked up immediately.
+        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
         super().end_headers()
 
     def do_OPTIONS(self):
@@ -474,8 +624,21 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_quote(parsed)
         elif parsed.path == '/api/swap':
             self._handle_swap(parsed)
+        elif parsed.path == '/api/token':
+            self._handle_token(parsed)
         else:
             super().do_GET()
+
+    def _handle_token(self, parsed):
+        addr = self._p(parsed, 'addr')
+        if not addr:
+            return self._json({'error': 'missing addr'}, 400)
+        if not _is_valid_address(addr):
+            return self._json({'error': 'invalid address'}, 400)
+        info = get_token_info(addr)
+        if 'error' in info:
+            return self._json(info, 400)
+        self._json(info)
 
     def _p(self, parsed, key, default=''):
         return parse_qs(parsed.query).get(key, [default])[0]
@@ -545,7 +708,7 @@ class Handler(SimpleHTTPRequestHandler):
             raw = get_inch_classic_swap(src, dst, amount, sender, slippage)
             if isinstance(raw, dict) and 'tx' in raw:
                 tx = raw['tx']
-                self._json({
+                response = {
                     'source': '1inch_classic',
                     'tx': {
                         'from': tx['from'],
@@ -555,7 +718,12 @@ class Handler(SimpleHTTPRequestHandler):
                         'gas': tx.get('gas', '0'),
                     },
                     'amount_out': raw.get('dstAmount', '0'),
-                })
+                }
+                # 1inch internally converts WETH -> native, so allowance is not needed
+                # for WETH src. Skip approval check for 1inch when src == WETH.
+                if src.lower() != WETH.lower():
+                    attach_approval_if_needed(response, src, sender, amount)
+                self._json(response)
             else:
                 self._json({'source': '1inch_classic',
                             'error': raw.get('error', 'unknown') if isinstance(raw, dict) else str(raw)})
@@ -569,7 +737,7 @@ class Handler(SimpleHTTPRequestHandler):
             order = orders[0]
             if order.get('transaction'):
                 tx = order['transaction']
-                self._json({
+                response = {
                     'source': 'fynd',
                     'tx': {
                         'from': sender,
@@ -578,13 +746,99 @@ class Handler(SimpleHTTPRequestHandler):
                         'value': tx.get('value', '0x0'),
                     },
                     'amount_out': order.get('amount_out', '0'),
-                })
+                }
+                attach_approval_if_needed(response, src, sender, amount)
+                self._json(response)
             else:
                 self._json({
                     'source': 'fynd',
                     'amount_out': order.get('amount_out', '0'),
                     'error': 'no calldata returned (token approval needed?)',
                 })
+        elif source == 'enso':
+            raw = get_enso_quote(src, dst, amount, sender)
+            if isinstance(raw, dict) and isinstance(raw.get('tx'), dict):
+                tx = raw['tx']
+                response = {
+                    'source': 'enso',
+                    'tx': {
+                        'from': tx.get('from', sender),
+                        'to': tx['to'],
+                        'data': tx['data'],
+                        'value': tx.get('value', '0'),
+                    },
+                    'amount_out': raw.get('amountOut', '0'),
+                }
+                attach_approval_if_needed(response, src, sender, amount)
+                self._json(response)
+            else:
+                err = raw.get('error', 'no tx in response') if isinstance(raw, dict) else str(raw)
+                self._json({'source': 'enso', 'error': err})
+        elif source == 'kyberswap':
+            quote_raw = get_kyberswap_quote(src, dst, amount)
+            if not isinstance(quote_raw, dict) or 'data' not in quote_raw:
+                return self._json({'source': 'kyberswap', 'error': str(quote_raw)})
+            qd = quote_raw['data']
+            if not isinstance(qd, dict) or 'routeSummary' not in qd:
+                return self._json({'source': 'kyberswap', 'error': 'no routeSummary in quote'})
+            build_raw = get_kyberswap_build(qd['routeSummary'], sender, slippage)
+            if not isinstance(build_raw, dict) or 'data' not in build_raw:
+                return self._json({'source': 'kyberswap', 'error': str(build_raw)})
+            bd = build_raw['data']
+            if isinstance(bd, dict) and 'data' in bd and 'routerAddress' in bd:
+                response = {
+                    'source': 'kyberswap',
+                    'tx': {
+                        'from': sender,
+                        'to': bd['routerAddress'],
+                        'data': bd['data'],
+                        'value': bd.get('transactionValue', '0'),
+                    },
+                    'amount_out': bd.get('amountOut', '0'),
+                }
+                attach_approval_if_needed(response, src, sender, amount)
+                self._json(response)
+            else:
+                self._json({'source': 'kyberswap', 'error': 'build response missing data/routerAddress'})
+        elif source == 'openocean':
+            src_dec = token_decimals(src)
+            try:
+                amount_human = int(amount) / (10 ** src_dec)
+                amount_str = f'{amount_human:.{src_dec}f}'.rstrip('0').rstrip('.')
+                if not amount_str:
+                    amount_str = '0'
+            except Exception as e:
+                return self._json({'source': 'openocean', 'error': f'amount conversion: {e}'})
+            try:
+                gas_gwei = max(1, int(gas_price) // 1_000_000_000)
+            except Exception:
+                gas_gwei = 50
+            raw = get_openocean_swap(src, dst, amount_str, sender, slippage, gas_gwei)
+            if isinstance(raw, dict) and isinstance(raw.get('data'), dict):
+                d = raw['data']
+                if 'to' in d and 'data' in d:
+                    response = {
+                        'source': 'openocean',
+                        'tx': {
+                            'from': sender,
+                            'to': d['to'],
+                            'data': d['data'],
+                            'value': d.get('value', '0'),
+                        },
+                        'amount_out': d.get('outAmount', '0'),
+                    }
+                    attach_approval_if_needed(response, src, sender, amount)
+                    self._json(response)
+                else:
+                    self._json({'source': 'openocean', 'error': 'response missing to/data'})
+            else:
+                err = raw.get('error', str(raw)) if isinstance(raw, dict) else str(raw)
+                self._json({'source': 'openocean', 'error': err})
+        elif source == 'cowswap':
+            self._json({
+                'source': 'cowswap',
+                'error': 'CowSwap is intent-based: requires off-chain order signing (not yet implemented). Use 1inch Classic, Fynd, KyberSwap, Enso, or OpenOcean.',
+            })
         else:
             self._json({'error': f'unknown source: {source}'}, 400)
 
