@@ -405,10 +405,18 @@ async function getQuote() {
       let execSource = d.winner;
       let note = '';
       if (INTENT_BASED.has(d.winner)) {
-        // Pick best executable from comparison list
-        const order = ['1inch_classic', 'fynd', 'kyberswap', 'enso', 'openocean'];
-        const fallback = order.find(s => d[s === '1inch_classic' ? 'inch_classic' : s]);
-        execSource = fallback || '1inch_classic';
+        // Pick best executable by amount_out (not first available).
+        const executable = ['1inch_classic', 'fynd', 'kyberswap', 'enso', 'openocean'];
+        let best = '1inch_classic', bestAmt = 0n;
+        for (const s of executable) {
+          const key = s === '1inch_classic' ? 'inch_classic' : s;
+          const v = d[key];
+          if (v && BigInt(v.amount_out || 0) > bestAmt) {
+            bestAmt = BigInt(v.amount_out);
+            best = s;
+          }
+        }
+        execSource = best;
         note = ` (${LABELS[d.winner]} is intent-based, click any card to choose)`;
       }
       const winLabel = LABELS[execSource] || execSource;

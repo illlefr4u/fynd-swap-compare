@@ -362,6 +362,9 @@ def token_decimals(addr):
     for info in TOKENS.values():
         if info['addr'].lower() == addr.lower():
             return info['dec']
+    cached = _TOKEN_INFO_CACHE.get(addr.lower())
+    if cached and isinstance(cached.get('decimals'), int):
+        return cached['decimals']
     return 18
 
 
@@ -696,8 +699,18 @@ class Handler(SimpleHTTPRequestHandler):
         if not source:
             quote = compare_and_pick(src, dst, amount, sender)
             source = quote['winner']
-            if source == '1inch_fusion':
-                source = '1inch_classic'  # fallback: fusion can't execute
+            if source in ('1inch_fusion', 'cowswap'):
+                # Intent-based winner can't execute via this endpoint.
+                # Pick best executable by amount_out from quote.
+                EXECUTABLE = ('1inch_classic', 'fynd', 'kyberswap', 'enso', 'openocean')
+                best, best_amt = '1inch_classic', 0
+                for s in EXECUTABLE:
+                    key = 'inch_classic' if s == '1inch_classic' else s
+                    v = quote.get(key)
+                    if v and int(v.get('amount_out', 0)) > best_amt:
+                        best_amt = int(v['amount_out'])
+                        best = s
+                source = best
 
         gas_data = get_gas()
         gas_price = '50000000'
